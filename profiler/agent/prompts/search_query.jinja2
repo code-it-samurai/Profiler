@@ -1,0 +1,31 @@
+Generate search queries to find a {{ target_type }} named "{{ target_name }}" on the internet.
+
+{% if initial_context %}Additional context: {{ initial_context }}{% endif %}
+
+{% if known_facts %}
+Known facts:
+{% for key, value in known_facts.items() %}
+- {{ key }}: {{ value }}
+{% endfor %}
+{% endif %}
+
+{% if search_history %}
+Already searched (DO NOT repeat these):
+{% for q in search_history %}
+- {{ q }}
+{% endfor %}
+{% endif %}
+
+Generate 3-5 search queries that will find this person's profiles. Include:
+1. A general Google search with their name + any known facts
+2. A Facebook-targeted search
+3. A Twitter/X-targeted search
+4. A LinkedIn-targeted search (if person)
+5. A news search if relevant
+
+Respond with ONLY this JSON:
+{
+    "queries": [
+        {"query": "search string", "site_filter": "facebook.com or null", "purpose": "why this query"}
+    ]
+}

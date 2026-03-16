@@ -1,0 +1,38 @@
+You are compiling a final profile dossier from verified search data.
+
+## Target: {{ target_name }} ({{ target_type }})
+
+## Verified Data:
+{% for c in candidates %}
+### Source: {{ c.platform.value }} — {{ c.profile_url }}
+- Name: {{ c.name }}
+- Location: {{ c.location or "N/A" }}
+- School: {{ c.school or "N/A" }}
+- Employer: {{ c.employer or "N/A" }}
+- Bio: {{ c.bio or "N/A" }}
+- Additional data: {{ c.raw_data | tojson }}
+{% endfor %}
+
+## Known Facts (confirmed by user):
+{% for key, value in known_facts.items() %}
+- {{ key }}: {{ value }}
+{% endfor %}
+
+## Your Task:
+Synthesize all data into a comprehensive profile.
+
+Rules:
+1. Only include facts that appear in the source data above. DO NOT infer or fabricate.
+2. If two sources conflict, note the discrepancy.
+3. Flag any low-confidence fields.
+4. Write a 2-3 paragraph narrative summary.
+
+Respond with ONLY this JSON:
+{
+    "summary": "narrative summary paragraph(s)",
+    "locations": ["list of known locations"],
+    "education": ["list of schools/universities"],
+    "employment": ["list of employers/roles"],
+    "associated_entities": ["related people, companies, orgs"],
+    "confidence_score": 0.0 to 1.0
+}

@@ -1,0 +1,35 @@
+You are analyzing search candidates to determine the BEST question to ask the user to narrow down results.
+
+## Candidates ({{ candidates | length }} total):
+{% for c in candidates %}
+- Name: {{ c.name }} | Platform: {{ c.platform.value }} | Location: {{ c.location or "unknown" }} | School: {{ c.school or "unknown" }} | Employer: {{ c.employer or "unknown" }}
+{% endfor %}
+
+## Field Statistics:
+{% for field, stats in field_stats.items() %}
+- {{ field }}: {{ stats.unique_count }} unique values. Top values: {{ stats.top_values | join(", ") }}
+{% endfor %}
+
+## Already Known:
+{% for key, value in known_facts.items() %}
+- {{ key }}: {{ value }}
+{% endfor %}
+
+## Your Task:
+Pick the ONE field that will eliminate the most candidates when the user answers.
+
+Rules:
+1. Pick fields with HIGH variance (many unique values = good discriminator).
+2. Prefer fields the user can easily answer: location > employer > school > bio details.
+3. NEVER ask about a field that is already in "Already Known".
+4. If options are available for the field, include the top 3-4 most common values as suggested options.
+5. The question should be natural and conversational.
+
+Respond with ONLY this JSON:
+{
+    "field": "the field name (location, school, employer, etc.)",
+    "question": "natural language question to ask the user",
+    "options": ["option1", "option2", "option3"] or null,
+    "reasoning": "why this field is the best discriminator",
+    "expected_elimination_pct": 0.75
+}
