@@ -1,0 +1,22 @@
+[
+    {
+        "title": "John Smith - Portland, OR | Facebook",
+        "url": "https://www.facebook.com/jsmith.portland",
+        "snippet": "John Smith lives in Portland, OR. Works at Nike."
+    },
+    {
+        "title": "John Smith (@johnsmith_pdx) / X",
+        "url": "https://x.com/johnsmith_pdx",
+        "snippet": "Marketing @ Nike. Go Ducks. Portland, OR."
+    },
+    {
+        "title": "John Smith - Marketing Manager - Nike | LinkedIn",
+        "url": "https://www.linkedin.com/in/johnsmith-pdx",
+        "snippet": "John Smith is a Marketing Manager at Nike based in Portland, Oregon."
+    },
+    {
+        "title": "John Smith - Wikipedia",
+        "url": "https://en.wikipedia.org/wiki/John_Smith",
+        "snippet": "John Smith is a common English name."
+    }
+]
