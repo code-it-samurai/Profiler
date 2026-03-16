@@ -35,10 +35,30 @@ async def start_search(req: SearchRequest, request: Request):
     """Start a new profiling session."""
     await check_rate_limit(request)
 
+    # Build known_facts from structured fields
+    known_facts = {}
+    if req.location:
+        known_facts["location"] = req.location
+    if req.school:
+        known_facts["school"] = req.school
+    if req.employer:
+        known_facts["employer"] = req.employer
+
+    # Build context with extra structured info
+    context_parts = []
+    if req.context:
+        context_parts.append(req.context)
+    if req.email:
+        context_parts.append(f"email: {req.email}")
+    if req.twitter_handle:
+        context_parts.append(f"twitter: {req.twitter_handle}")
+    context = "; ".join(context_parts) if context_parts else req.context
+
     session = SearchSession(
         target_name=req.name,
         target_type=req.target_type,
-        context=req.context,
+        context=context,
+        known_facts=known_facts,
     )
     await create_session(session)
 
@@ -62,13 +82,28 @@ async def stream_search(session_id: str, request: Request):
 
             thread_config = {"configurable": {"thread_id": session_id}}
 
+            # Build known_facts and direct_urls from structured request fields
+            import json as _json
+
+            known_facts = {}
+            direct_urls = []
+            # Decode stored known_facts from session if present
+            stored_facts = session.get("known_facts", "{}")
+            if isinstance(stored_facts, str):
+                try:
+                    known_facts = _json.loads(stored_facts)
+                except _json.JSONDecodeError:
+                    pass
+            elif isinstance(stored_facts, dict):
+                known_facts = stored_facts
+
             # Initial state
             initial_state = {
                 "target_name": session["target_name"],
                 "target_type": session["target_type"],
                 "initial_context": session["context"] or "",
                 "session_id": session_id,
-                "known_facts": {},
+                "known_facts": known_facts,
                 "candidates": [],
                 "eliminated": [],
                 "search_history": [],
@@ -76,6 +111,7 @@ async def stream_search(session_id: str, request: Request):
                 "current_question": None,
                 "user_answer": None,
                 "_raw_search_results": [],
+                "direct_urls": direct_urls,
                 "final_profile": None,
                 "status": SessionStatus.SEARCHING,
                 "error": None,

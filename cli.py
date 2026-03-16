@@ -6,6 +6,8 @@ Usage:
     python cli.py "John Smith"
     python cli.py "Acme Corp" --type company
     python cli.py "Jane Doe" --context "lives in Austin, went to UT"
+    python cli.py "John Smith" --location "Portland" --employer "Nike"
+    python cli.py "John Smith" --twitter "@jsmith" --linkedin "https://linkedin.com/in/jsmith"
     python cli.py "John Smith" --output ./results/
 """
 
@@ -140,12 +142,50 @@ async def check_ollama():
         return False
 
 
-async def run_search(name: str, target_type: TargetType, context: str, output_dir: str):
+async def run_search(
+    args: argparse.Namespace, target_type: TargetType, output_dir: str
+):
     """Run the full agent pipeline interactively."""
 
     # Pre-flight check
     if not await check_ollama():
         sys.exit(1)
+
+    name = args.name
+
+    # Build known_facts from structured input
+    known_facts = {}
+    if args.location:
+        known_facts["location"] = args.location
+    if args.school:
+        known_facts["school"] = args.school
+    if args.employer:
+        known_facts["employer"] = args.employer
+
+    # Build direct URLs list
+    direct_urls = []
+    if args.facebook:
+        direct_urls.append(args.facebook)
+    if args.linkedin:
+        direct_urls.append(args.linkedin)
+    if args.website:
+        direct_urls.append(args.website)
+    if args.twitter:
+        handle = args.twitter.lstrip("@")
+        direct_urls.append(f"https://x.com/{handle}")
+    if args.instagram:
+        handle = args.instagram.lstrip("@")
+        direct_urls.append(f"https://instagram.com/{handle}")
+
+    # Build context string from all inputs for the LLM
+    context_parts = []
+    if args.context:
+        context_parts.append(args.context)
+    if args.email:
+        context_parts.append(f"email: {args.email}")
+    if args.twitter:
+        context_parts.append(f"twitter: {args.twitter}")
+    context = "; ".join(context_parts) if context_parts else ""
 
     session_id = str(uuid4())
     checkpointer = await get_checkpointer()
@@ -157,7 +197,7 @@ async def run_search(name: str, target_type: TargetType, context: str, output_di
         "target_type": target_type,
         "initial_context": context,
         "session_id": session_id,
-        "known_facts": {},
+        "known_facts": known_facts,
         "candidates": [],
         "eliminated": [],
         "search_history": [],
@@ -165,6 +205,7 @@ async def run_search(name: str, target_type: TargetType, context: str, output_di
         "current_question": None,
         "user_answer": None,
         "_raw_search_results": [],
+        "direct_urls": direct_urls,
         "final_profile": None,
         "status": SessionStatus.SEARCHING,
         "error": None,
@@ -173,6 +214,10 @@ async def run_search(name: str, target_type: TargetType, context: str, output_di
     console.print(f"\n[bold]Searching for:[/bold] {name}")
     if context:
         console.print(f"[bold]Context:[/bold] {context}")
+    if known_facts:
+        console.print(f"[bold]Known facts:[/bold] {known_facts}")
+    if direct_urls:
+        console.print(f"[bold]Direct URLs:[/bold] {', '.join(direct_urls)}")
     console.print()
 
     # --- Run the graph until first interrupt ---
@@ -336,7 +381,9 @@ Examples:
   python cli.py "Elon Musk"
   python cli.py "Jane Doe" --context "lives in Austin, works at Dell"
   python cli.py "Acme Corp" --type company
-  python cli.py "John Smith" --output ./results/
+  python cli.py "John Smith" --location "Portland" --employer "Nike"
+  python cli.py "John Smith" --twitter "@jsmith" --facebook "https://facebook.com/jsmith"
+  python cli.py "John Smith" --email "jsmith@example.com" --output ./results/
         """,
     )
     parser.add_argument("name", help="Person or company name to search")
@@ -359,6 +406,20 @@ Examples:
         default="./output",
         help="Directory to save the JSON profile (default: ./output)",
     )
+    # Structured optional fields
+    parser.add_argument("--email", "-e", default=None, help="Email address")
+    parser.add_argument(
+        "--location", "-l", default=None, help="City, state, or country"
+    )
+    parser.add_argument("--school", default=None, help="School or university name")
+    parser.add_argument("--employer", default=None, help="Current or past employer")
+    parser.add_argument(
+        "--twitter", default=None, help="Twitter/X handle (with or without @)"
+    )
+    parser.add_argument("--facebook", default=None, help="Facebook profile URL")
+    parser.add_argument("--linkedin", default=None, help="LinkedIn profile URL")
+    parser.add_argument("--instagram", default=None, help="Instagram handle")
+    parser.add_argument("--website", "-w", default=None, help="Personal website URL")
 
     args = parser.parse_args()
 
@@ -367,7 +428,7 @@ Examples:
     target_type = TargetType.PERSON if args.type == "person" else TargetType.COMPANY
 
     try:
-        asyncio.run(run_search(args.name, target_type, args.context, args.output))
+        asyncio.run(run_search(args, target_type, args.output))
     except KeyboardInterrupt:
         console.print("\n[yellow]Search cancelled.[/yellow]")
         sys.exit(0)

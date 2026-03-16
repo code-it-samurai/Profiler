@@ -33,6 +33,9 @@ class AgentState(TypedDict):
     search_history: list[str]  # queries already executed
     narrowing_round: int
 
+    # Direct URLs provided by user (skip search, scrape directly)
+    direct_urls: list[str]  # facebook_url, linkedin_url, website, etc.
+
     # Inter-node communication
     current_question: Optional[dict]  # {field, question, options, reasoning}
     user_answer: Optional[str]  # answer from user (set after interrupt)

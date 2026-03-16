@@ -55,23 +55,86 @@ class CompilationResult(BaseModel):
 
 
 async def broad_search(state: AgentState) -> dict:
-    """Node 1: Generate search queries and execute them."""
+    """Node 1: Generate search queries, execute them, and collect direct URLs.
+
+    Also pre-populates known_facts from any structured user input (location,
+    school, employer) so the narrowing loop never re-asks those fields.
+    """
     logger.info(f"BROAD_SEARCH: Searching for '{state['target_name']}'")
 
+    # --- A) Pre-populate known_facts from structured user input ---
+    known_facts = dict(state.get("known_facts", {}))
+    initial_context = state.get("initial_context", "")
+
+    # These may already be set by the CLI/API layer, but merge defensively
+    for field in ["location", "school", "employer"]:
+        value = known_facts.get(field)
+        if value:
+            known_facts[field] = value
+
+    # --- B) Collect direct URLs from user input ---
+    direct_urls = list(state.get("direct_urls", []))
+
+    # --- C) Build enriched search queries using structured fields ---
+    name = state["target_name"]
+    enriched_queries: list[dict] = []
+
+    if known_facts.get("location"):
+        enriched_queries.append(
+            {
+                "query": f"{name} {known_facts['location']}",
+                "site_filter": None,
+                "purpose": "name+location",
+            }
+        )
+    if known_facts.get("employer"):
+        enriched_queries.append(
+            {
+                "query": f"{name} {known_facts['employer']}",
+                "site_filter": None,
+                "purpose": "name+employer",
+            }
+        )
+    if known_facts.get("school"):
+        enriched_queries.append(
+            {
+                "query": f"{name} {known_facts['school']}",
+                "site_filter": None,
+                "purpose": "name+school",
+            }
+        )
+    # Email exact-match search
+    email_hint = None
+    if initial_context:
+        # Extract email from context string if present (set by CLI)
+        for part in initial_context.split(";"):
+            part = part.strip()
+            if part.startswith("email:"):
+                email_hint = part.split(":", 1)[1].strip()
+    if email_hint:
+        enriched_queries.append(
+            {
+                "query": f'"{email_hint}"',
+                "site_filter": None,
+                "purpose": "email exact match",
+            }
+        )
+
+    # --- D) Ask LLM for additional queries ---
     system_tpl = _template_env.get_template("system.jinja2")
     system_prompt = system_tpl.render(
         target_name=state["target_name"],
         target_type=state["target_type"],
-        initial_context=state.get("initial_context", ""),
-        known_facts=state.get("known_facts", {}),
+        initial_context=initial_context,
+        known_facts=known_facts,
     )
 
     query_tpl = _template_env.get_template("search_query.jinja2")
     query_prompt = query_tpl.render(
         target_name=state["target_name"],
         target_type=state["target_type"],
-        initial_context=state.get("initial_context", ""),
-        known_facts=state.get("known_facts", {}),
+        initial_context=initial_context,
+        known_facts=known_facts,
         search_history=state.get("search_history", []),
     )
 
@@ -84,7 +147,6 @@ async def broad_search(state: AgentState) -> dict:
         )
     except ValueError:
         # Fallback: manual query generation
-        name = state["target_name"]
         search_plan = SearchQueries(
             queries=[
                 {"query": name, "site_filter": None, "purpose": "general"},
@@ -94,12 +156,15 @@ async def broad_search(state: AgentState) -> dict:
             ]
         )
 
-    # Execute all searches concurrently
+    # Merge enriched queries with LLM-generated queries (enriched first)
+    all_queries = enriched_queries + search_plan.queries
+
+    # --- E) Execute all searches concurrently ---
     all_results = []
     new_search_history = list(state.get("search_history", []))
 
     tasks = []
-    for q in search_plan.queries:
+    for q in all_queries:
         query_str = q["query"] if isinstance(q, dict) else q.query
         site = (
             q.get("site_filter")
@@ -114,24 +179,44 @@ async def broad_search(state: AgentState) -> dict:
     for result in results_lists:
         if isinstance(result, list):
             all_results.extend(result)
+        elif isinstance(result, Exception):
+            logger.warning(f"Search query failed: {result}")
+            # Continue with other results — don't fail
 
-    if not all_results:
+    # --- F) Only fail if no results AND no direct URLs ---
+    has_direct_urls = len(direct_urls) > 0
+    if not all_results and not has_direct_urls:
         return {
             "status": SessionStatus.FAILED,
             "error": "No search results found for this name.",
+            "known_facts": known_facts,
         }
 
     return {
         "search_history": new_search_history,
+        "known_facts": known_facts,
+        "direct_urls": direct_urls,
         "status": SessionStatus.SEARCHING,
         "_raw_search_results": all_results,
     }
 
 
 async def extract_and_normalize(state: AgentState) -> dict:
-    """Node 2: Scrape search result URLs and extract candidate profiles."""
-    raw_results = state.get("_raw_search_results", [])
-    logger.info(f"EXTRACT: Processing {len(raw_results)} search results")
+    """Node 2: Scrape search result URLs and extract candidate profiles.
+
+    Merges direct_urls (user-provided, high priority) with search results.
+    """
+    raw_results = list(state.get("_raw_search_results", []))
+    direct_urls = state.get("direct_urls", [])
+
+    # Prepend direct URLs as high-priority scrape targets
+    for url in direct_urls:
+        raw_results.insert(0, {"title": "", "url": url, "snippet": ""})
+
+    logger.info(
+        f"EXTRACT: Processing {len(raw_results)} results "
+        f"({len(direct_urls)} direct URLs + {len(raw_results) - len(direct_urls)} search results)"
+    )
 
     # Deduplicate URLs
     seen_urls = set()

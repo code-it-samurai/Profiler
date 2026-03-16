@@ -36,6 +36,7 @@ def make_state(**overrides) -> dict:
         "current_question": None,
         "user_answer": None,
         "_raw_search_results": [],
+        "direct_urls": [],
         "final_profile": None,
         "status": SessionStatus.SEARCHING,
         "error": None,
@@ -98,8 +99,8 @@ class TestBroadSearch:
         assert len(result["_raw_search_results"]) == 1
         assert "John Smith" in result["search_history"]
 
-    async def test_broad_search_no_results(self):
-        """Test broad search when no results found."""
+    async def test_broad_search_no_results_no_urls(self):
+        """Test broad search fails only when no results AND no direct URLs."""
         state = make_state()
 
         with patch(
@@ -123,6 +124,28 @@ class TestBroadSearch:
         assert result["status"] == SessionStatus.FAILED
         assert "No search results" in result["error"]
 
+    async def test_broad_search_no_results_but_has_direct_urls(self):
+        """Test broad search succeeds when search empty but direct URLs present."""
+        state = make_state(direct_urls=["https://facebook.com/jsmith"])
+
+        with patch(
+            "profiler.agent.nodes.validated_llm_call", new_callable=AsyncMock
+        ) as mock_llm:
+            mock_llm.return_value = SearchQueries(
+                queries=[
+                    {"query": "John Smith", "site_filter": None, "purpose": "general"}
+                ]
+            )
+            with patch(
+                "profiler.agent.nodes.google_search", new_callable=AsyncMock
+            ) as mock_search:
+                mock_search.return_value = []
+                result = await broad_search(state)
+
+        # Should NOT fail — direct URLs will be scraped in extract_and_normalize
+        assert result["status"] == SessionStatus.SEARCHING
+        assert "https://facebook.com/jsmith" in result["direct_urls"]
+
     async def test_broad_search_llm_fallback(self):
         """Test broad search falls back to manual queries when LLM fails."""
         state = make_state()
@@ -142,6 +165,37 @@ class TestBroadSearch:
         assert result["status"] == SessionStatus.SEARCHING
         # Should have generated fallback queries
         assert len(result["search_history"]) > 0
+
+    async def test_broad_search_enriched_queries(self):
+        """Test that structured fields generate enriched search queries."""
+        state = make_state(
+            known_facts={"location": "Portland", "employer": "Nike"},
+        )
+
+        captured_queries = []
+
+        async def mock_search(query, num_results=10, site_filter=None):
+            captured_queries.append(query)
+            return [
+                {
+                    "title": "R",
+                    "url": f"http://ex.com/{len(captured_queries)}",
+                    "snippet": "S",
+                }
+            ]
+
+        with patch(
+            "profiler.agent.nodes.validated_llm_call", new_callable=AsyncMock
+        ) as mock_llm:
+            mock_llm.side_effect = ValueError("LLM failed")
+            with patch("profiler.agent.nodes.google_search", side_effect=mock_search):
+                result = await broad_search(state)
+
+        assert result["status"] == SessionStatus.SEARCHING
+        # Should include enriched queries like "John Smith Portland" and "John Smith Nike"
+        query_text = " ".join(result["search_history"])
+        assert "Portland" in query_text
+        assert "Nike" in query_text
 
 
 class TestFilterCandidates:

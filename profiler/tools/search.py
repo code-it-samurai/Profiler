@@ -1,7 +1,11 @@
 import hashlib
 import logging
+import warnings
 from typing import Optional
-from duckduckgo_search import DDGS
+
+warnings.filterwarnings("ignore", message=".*renamed.*ddgs.*")
+
+from ddgs import DDGS
 
 logger = logging.getLogger(__name__)
 
