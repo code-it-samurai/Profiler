@@ -23,13 +23,20 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.prompt import Prompt
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TaskProgressColumn,
+)
 from rich import print as rprint
 
 from profiler.config import settings
 from profiler.models.enums import TargetType, SessionStatus
 from profiler.agent.graph import build_graph, get_checkpointer
 from profiler.agent.state import AgentState
+from profiler.agent.progress import set_progress_callback
 
 console = Console()
 
@@ -238,37 +245,35 @@ async def run_search(
         console.print(f"[bold]Direct URLs:[/bold] {', '.join(direct_urls)}")
     console.print()
 
+    # --- Wire up progress callback to print live updates ---
+    _phase_labels = {
+        "broad_search": ("1/6", "cyan", "Broad Search"),
+        "extract": ("2/6", "cyan", "Extract"),
+        "scraping": ("2/6", "blue", "Scraping"),
+        "extracting": ("2/6", "magenta", "LLM Extract"),
+        "analyze": ("3/6", "yellow", "Analyze"),
+        "filter": ("4/6", "yellow", "Filter"),
+        "deep_scrape": ("5/6", "blue", "Deep Scrape"),
+        "compile": ("6/6", "green", "Compile"),
+    }
+
+    def _on_progress(step: str, detail: str, pct: int | None):
+        label_info = _phase_labels.get(step, ("?", "white", step))
+        phase_num, color, phase_name = label_info
+        pct_str = f" {pct}%" if pct is not None else ""
+        console.print(
+            f"  [{color}][{phase_num}] {phase_name}{pct_str}[/{color}] {detail}"
+        )
+
+    set_progress_callback(_on_progress)
+
     # --- Run the graph until first interrupt ---
     current_state = dict(initial_state)
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-        transient=True,
-    ) as progress:
-        task = progress.add_task(
-            "Broad search -- querying Google and social media...", total=None
-        )
-
-        async for event in graph.astream(initial_state, config=thread_config):
-            for node_name, node_output in event.items():
-                if isinstance(node_output, dict):
-                    current_state = {**current_state, **node_output}
-
-                if node_name == "broad_search":
-                    progress.update(
-                        task,
-                        description="Scraping and extracting profiles...",
-                    )
-                elif node_name == "extract_and_normalize":
-                    n = len(current_state.get("candidates", []))
-                    progress.update(
-                        task,
-                        description=f"Found {n} candidates. Analyzing...",
-                    )
-                elif node_name == "analyze_candidates":
-                    progress.update(task, description="Preparing narrowing question...")
+    async for event in graph.astream(initial_state, config=thread_config):
+        for node_name, node_output in event.items():
+            if isinstance(node_output, dict):
+                current_state = {**current_state, **node_output}
 
     # Check for early failure
     if current_state.get("status") == SessionStatus.FAILED:
@@ -340,40 +345,10 @@ async def run_search(
             {"user_answer": answer, "status": SessionStatus.NARROWING},
         )
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-            transient=True,
-        ) as progress:
-            task = progress.add_task("Filtering candidates...", total=None)
-
-            async for event in graph.astream(None, config=thread_config):
-                for node_name, node_output in event.items():
-                    if isinstance(node_output, dict):
-                        state = {**state, **node_output}
-
-                    if node_name == "filter_candidates":
-                        n = len(state.get("candidates", []))
-                        progress.update(
-                            task,
-                            description=f"{n} candidates remaining...",
-                        )
-                    elif node_name == "analyze_candidates":
-                        progress.update(
-                            task,
-                            description="Analyzing for next question...",
-                        )
-                    elif node_name == "deep_scrape":
-                        progress.update(
-                            task,
-                            description="Deep scraping final candidates...",
-                        )
-                    elif node_name == "compile_profile":
-                        progress.update(
-                            task,
-                            description="Compiling final profile...",
-                        )
+        async for event in graph.astream(None, config=thread_config):
+            for node_name, node_output in event.items():
+                if isinstance(node_output, dict):
+                    state = {**state, **node_output}
 
     # --- Output ---
     final_snapshot = await graph.aget_state(thread_config)

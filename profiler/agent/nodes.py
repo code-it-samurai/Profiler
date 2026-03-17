@@ -16,6 +16,7 @@ from profiler.tools.search import google_search
 from profiler.tools.scraper import scrape_page
 from profiler.tools.extractor import extract_profile
 from profiler.tools.matcher import fuzzy_match
+from profiler.agent.progress import emit
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ async def broad_search(state: AgentState) -> dict:
     school, employer) so the narrowing loop never re-asks those fields.
     """
     logger.info(f"BROAD_SEARCH: Searching for '{state['target_name']}'")
+    emit("broad_search", f'Starting search for "{state["target_name"]}"')
 
     # --- A) Pre-populate known_facts from structured user input ---
     known_facts = dict(state.get("known_facts", {}))
@@ -120,7 +122,21 @@ async def broad_search(state: AgentState) -> dict:
             }
         )
 
+    if enriched_queries:
+        emit(
+            "broad_search",
+            f"Built {len(enriched_queries)} enriched queries from known facts",
+            10,
+        )
+    if direct_urls:
+        emit(
+            "broad_search",
+            f"Will scrape {len(direct_urls)} direct URLs: {', '.join(direct_urls)}",
+            10,
+        )
+
     # --- D) Ask LLM for additional queries ---
+    emit("broad_search", "Asking LLM to generate search queries...", 15)
     system_tpl = _template_env.get_template("system.jinja2")
     system_prompt = system_tpl.render(
         target_name=state["target_name"],
@@ -147,6 +163,7 @@ async def broad_search(state: AgentState) -> dict:
         )
     except ValueError:
         # Fallback: manual query generation
+        emit("broad_search", "LLM query generation failed, using fallback queries", 30)
         search_plan = SearchQueries(
             queries=[
                 {"query": name, "site_filter": None, "purpose": "general"},
@@ -158,6 +175,7 @@ async def broad_search(state: AgentState) -> dict:
 
     # Merge enriched queries with LLM-generated queries (enriched first)
     all_queries = enriched_queries + search_plan.queries
+    emit("broad_search", f"Generated {len(all_queries)} search queries total", 35)
 
     # --- E) Execute all searches concurrently ---
     all_results = []
@@ -175,6 +193,7 @@ async def broad_search(state: AgentState) -> dict:
             tasks.append(google_search(query_str, num_results=10, site_filter=site))
             new_search_history.append(query_str)
 
+    emit("broad_search", f"Executing {len(tasks)} search queries concurrently...", 40)
     results_lists = await asyncio.gather(*tasks, return_exceptions=True)
     for result in results_lists:
         if isinstance(result, list):
@@ -182,6 +201,12 @@ async def broad_search(state: AgentState) -> dict:
         elif isinstance(result, Exception):
             logger.warning(f"Search query failed: {result}")
             # Continue with other results — don't fail
+
+    emit(
+        "broad_search",
+        f"Search complete: {len(all_results)} results from {len(tasks)} queries",
+        90,
+    )
 
     # --- F) Only fail if no results AND no direct URLs ---
     has_direct_urls = len(direct_urls) > 0
@@ -217,6 +242,11 @@ async def extract_and_normalize(state: AgentState) -> dict:
         f"EXTRACT: Processing {len(raw_results)} results "
         f"({len(direct_urls)} direct URLs + {len(raw_results) - len(direct_urls)} search results)"
     )
+    emit(
+        "extract",
+        f"Processing {len(raw_results)} URLs ({len(direct_urls)} direct, {len(raw_results) - len(direct_urls)} from search)",
+        0,
+    )
 
     # Deduplicate URLs
     seen_urls = set()
@@ -235,13 +265,39 @@ async def extract_and_normalize(state: AgentState) -> dict:
             return await scrape_page(url, max_chars=6000)
 
     # Only scrape top 20 results to keep things manageable
-    scrape_tasks = [scrape_with_limit(r["url"]) for r in unique_results[:20]]
+    to_scrape = unique_results[:20]
+    emit(
+        "scraping", f"Scraping {len(to_scrape)} unique URLs (max concurrency: 5)...", 10
+    )
+    scrape_tasks = [scrape_with_limit(r["url"]) for r in to_scrape]
     scraped_pages = await asyncio.gather(*scrape_tasks, return_exceptions=True)
 
-    # Extract profiles from scraped pages
+    success_count = sum(
+        1 for p in scraped_pages if isinstance(p, dict) and p.get("success")
+    )
+    fail_count = len(scraped_pages) - success_count
+    emit(
+        "scraping",
+        f"Scraped {success_count} pages successfully, {fail_count} failed",
+        50,
+    )
+
+    # Extract profiles from scraped pages (LLM call per page — this is slow)
     candidates = list(state.get("candidates", []))
+    total_to_extract = sum(
+        1 for p in scraped_pages if isinstance(p, dict) and p.get("success")
+    )
+    extracted_count = 0
     for page_data in scraped_pages:
         if isinstance(page_data, dict) and page_data.get("success"):
+            extracted_count += 1
+            url = page_data.get("url", "?")
+            pct = 50 + int((extracted_count / max(total_to_extract, 1)) * 45)
+            emit(
+                "extracting",
+                f"[{extracted_count}/{total_to_extract}] Extracting profile from {url[:60]}...",
+                pct,
+            )
             profile = await extract_profile(page_data, state["target_name"])
             if profile:
                 candidates.append(profile)
@@ -256,6 +312,11 @@ async def extract_and_normalize(state: AgentState) -> dict:
             deduped.append(c)
 
     logger.info(f"EXTRACT: Found {len(deduped)} unique candidates")
+    emit(
+        "extract",
+        f"Extraction complete: {len(deduped)} unique candidate profiles found",
+        100,
+    )
 
     return {
         "candidates": deduped,
@@ -270,6 +331,11 @@ async def analyze_candidates(state: AgentState) -> dict:
 
     logger.info(
         f"ANALYZE: {len(candidates)} candidates, round {state.get('narrowing_round', 0)}"
+    )
+    emit(
+        "analyze",
+        f"Analyzing {len(candidates)} candidates (round {state.get('narrowing_round', 0)})",
+        0,
     )
 
     # Build field statistics
@@ -289,8 +355,17 @@ async def analyze_candidates(state: AgentState) -> dict:
 
     if not field_stats:
         # No more fields to narrow on -- go to deep scrape
+        emit("analyze", "No more fields to narrow on, moving to deep scrape", 100)
         return {"status": SessionStatus.COMPILING}
 
+    for field_name, stats in field_stats.items():
+        emit(
+            "analyze",
+            f"  Field '{field_name}': {stats['unique_count']} unique values, top: {', '.join(stats['top_values'][:3])}",
+            30,
+        )
+
+    emit("analyze", "Asking LLM to pick the best narrowing question...", 50)
     system_tpl = _template_env.get_template("system.jinja2")
     system_prompt = system_tpl.render(
         target_name=state["target_name"],
@@ -312,6 +387,11 @@ async def analyze_candidates(state: AgentState) -> dict:
             user_prompt=narrowing_prompt,
             response_model=NarrowingDecision,
             num_ctx=16384,
+        )
+        emit(
+            "analyze",
+            f"Best question: '{decision.question}' (field: {decision.field})",
+            100,
         )
         return {
             "current_question": {
@@ -347,6 +427,7 @@ async def filter_candidates(state: AgentState) -> dict:
     known_facts = dict(state.get("known_facts", {}))
 
     logger.info(f"FILTER: Applying answer '{answer}' to field '{field}'")
+    emit("filter", f'Filtering {len(candidates)} candidates by {field}="{answer}"', 0)
 
     # Add to known facts
     known_facts[field] = answer
@@ -371,6 +452,11 @@ async def filter_candidates(state: AgentState) -> dict:
     round_num = state.get("narrowing_round", 0) + 1
 
     logger.info(f"FILTER: {len(kept)} kept, {len(eliminated)} total eliminated")
+    emit(
+        "filter",
+        f"Result: {len(kept)} candidates kept, {len(candidates) - len(kept)} eliminated this round",
+        100,
+    )
 
     return {
         "candidates": kept,
@@ -386,13 +472,30 @@ async def filter_candidates(state: AgentState) -> dict:
 async def deep_scrape(state: AgentState) -> dict:
     """Node 6: Deep scrape the final shortlisted candidates."""
     candidates = state.get("candidates", [])
-    logger.info(f"DEEP_SCRAPE: Enriching {len(candidates)} candidates")
+    to_scrape = candidates[:3]
+    logger.info(f"DEEP_SCRAPE: Enriching {len(to_scrape)} candidates")
+    emit(
+        "deep_scrape",
+        f"Deep scraping {len(to_scrape)} final candidates for full profiles",
+        0,
+    )
 
     enriched = []
-    for candidate in candidates[:3]:  # max 3 deep scrapes
+    for i, candidate in enumerate(to_scrape):
+        pct = int(((i + 1) / max(len(to_scrape), 1)) * 100)
         if candidate.profile_url:
+            emit(
+                "deep_scrape",
+                f"[{i + 1}/{len(to_scrape)}] Scraping {candidate.profile_url[:60]}...",
+                pct,
+            )
             scraped = await scrape_page(candidate.profile_url, max_chars=12000)
             if scraped.get("success"):
+                emit(
+                    "deep_scrape",
+                    f"[{i + 1}/{len(to_scrape)}] Extracting enriched data via LLM...",
+                    pct,
+                )
                 # Re-extract with more data
                 enriched_profile = await extract_profile(scraped, state["target_name"])
                 if enriched_profile:
@@ -402,7 +505,14 @@ async def deep_scrape(state: AgentState) -> dict:
                         if new_val and not getattr(candidate, field):
                             setattr(candidate, field, new_val)
                     candidate.raw_data.update(enriched_profile.raw_data)
+            else:
+                emit(
+                    "deep_scrape",
+                    f"[{i + 1}/{len(to_scrape)}] Scrape failed for {candidate.profile_url[:40]}",
+                    pct,
+                )
         enriched.append(candidate)
+    emit("deep_scrape", f"Deep scrape complete for {len(enriched)} candidates", 100)
 
     return {
         "candidates": enriched,
@@ -416,6 +526,12 @@ async def compile_profile(state: AgentState) -> dict:
     known_facts = state.get("known_facts", {})
 
     logger.info(f"COMPILE: Building profile from {len(candidates)} candidates")
+    emit(
+        "compile",
+        f"Compiling final profile from {len(candidates)} candidates and {len(known_facts)} known facts",
+        0,
+    )
+    emit("compile", "Asking LLM to synthesize all data into a dossier...", 20)
 
     system_tpl = _template_env.get_template("system.jinja2")
     system_prompt = system_tpl.render(
@@ -459,6 +575,12 @@ async def compile_profile(state: AgentState) -> dict:
             for url in c.source_urls:
                 sources.append(Source(url=url))
 
+        emit(
+            "compile",
+            f"LLM response received, building profile object (confidence: {result.confidence_score:.0%})",
+            80,
+        )
+
         profile = Profile(
             target_name=state["target_name"],
             target_type=state["target_type"],
@@ -472,12 +594,18 @@ async def compile_profile(state: AgentState) -> dict:
             confidence_score=result.confidence_score,
         )
 
+        emit(
+            "compile",
+            f"Profile complete: {len(social_profiles)} social profiles, {len(sources)} sources",
+            100,
+        )
         return {
             "final_profile": profile,
             "status": SessionStatus.DONE,
         }
     except Exception as e:
         logger.error(f"Profile compilation failed: {e}")
+        emit("compile", f"Compilation failed: {e}", 100)
         return {
             "status": SessionStatus.FAILED,
             "error": f"Failed to compile profile: {e}",
