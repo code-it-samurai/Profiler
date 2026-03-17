@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen3.5:9b"
     ollama_temperature: float = 0.1
     ollama_default_num_ctx: int = 16384
-    ollama_timeout_seconds: int = 60
+    ollama_timeout_seconds: int = 120
     ollama_max_retries: int = 2
 
     # App

@@ -27,6 +27,9 @@ def get_llm(num_ctx: int | None = None, json_mode: bool = True) -> ChatOllama:
         # When reasoning is enabled, the model puts output in a thinking field
         # instead of the content field, which breaks JSON extraction.
         "reasoning": False,
+        # Pass timeout to the underlying ollama httpx client.
+        # Needed for cold model loading (6.6GB qwen3.5:9b can take 30-60s).
+        "client_kwargs": {"timeout": float(settings.ollama_timeout_seconds)},
     }
     if json_mode:
         kwargs["format"] = "json"
@@ -99,6 +102,11 @@ async def validated_llm_call(
             logger.warning(
                 f"LLM validation failed (attempt {attempt + 1}): {last_error}"
             )
+        except Exception as e:
+            # Catch connection/transport errors (httpx.RemoteProtocolError,
+            # ConnectionError, TimeoutError, etc.) and treat as retryable.
+            last_error = f"LLM connection error: {e}"
+            logger.warning(f"LLM call failed (attempt {attempt + 1}): {last_error}")
 
         # Append error context for retry
         current_user_prompt = (

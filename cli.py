@@ -118,7 +118,7 @@ def save_profile_json(profile_data: dict, target_name: str, output_dir: str) -> 
 
 
 async def check_ollama():
-    """Verify Ollama is running and model is available."""
+    """Verify Ollama is running, model is available, and pre-warm it."""
     import httpx
 
     try:
@@ -135,9 +135,27 @@ async def check_ollama():
                     f"[yellow]Run: ollama pull {settings.ollama_model}[/yellow]"
                 )
                 return False
-            return True
-    except Exception:
-        console.print("[red]Cannot connect to Ollama.[/red]")
+
+        # Pre-warm: load model into memory with a trivial request.
+        # Cold-loading a 6.6GB model from disk can take 30-60s and causes
+        # connection drops if the first real LLM call hits before it's ready.
+        console.print("[dim]Loading model into memory...[/dim]")
+        async with httpx.AsyncClient(
+            timeout=float(settings.ollama_timeout_seconds),
+        ) as client:
+            await client.post(
+                f"{settings.ollama_base_url}/api/generate",
+                json={
+                    "model": settings.ollama_model,
+                    "prompt": "hi",
+                    "stream": False,
+                    "options": {"num_ctx": 512, "num_predict": 1},
+                },
+            )
+        console.print("[dim]Model ready.[/dim]")
+        return True
+    except Exception as e:
+        console.print(f"[red]Cannot connect to Ollama: {e}[/red]")
         console.print("[yellow]Run: ollama serve[/yellow]")
         return False
 
