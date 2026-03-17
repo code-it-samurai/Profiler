@@ -37,4 +37,8 @@ class Profile(BaseModel):
     news_mentions: list[NewsMention] = Field(default_factory=list)
     sources: list[Source] = Field(default_factory=list)
     confidence_score: float = 0.0
+    candidates_found: int = 0
+    candidates_remaining: int = 0
+    narrowing_summary: str = ""
+    candidate_profiles: list[dict] = Field(default_factory=list)
     compiled_at: datetime = Field(default_factory=datetime.utcnow)

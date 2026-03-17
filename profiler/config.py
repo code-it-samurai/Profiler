@@ -5,7 +5,7 @@ from pydantic import Field
 class Settings(BaseSettings):
     # Ollama
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen3.5:9b"
+    ollama_model: str = "phi3"
     ollama_temperature: float = 0.1
     ollama_default_num_ctx: int = 16384
     ollama_timeout_seconds: int = 120

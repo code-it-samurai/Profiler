@@ -282,25 +282,38 @@ async def extract_and_normalize(state: AgentState) -> dict:
         50,
     )
 
-    # Extract profiles from scraped pages (LLM call per page — this is slow)
+    # Extract profiles from scraped pages concurrently (LLM call per page)
     candidates = list(state.get("candidates", []))
-    total_to_extract = sum(
-        1 for p in scraped_pages if isinstance(p, dict) and p.get("success")
+    successful_pages = [
+        p for p in scraped_pages if isinstance(p, dict) and p.get("success")
+    ]
+    emit(
+        "extracting",
+        f"Extracting profiles from {len(successful_pages)} pages concurrently (max 3)...",
+        55,
     )
-    extracted_count = 0
-    for page_data in scraped_pages:
-        if isinstance(page_data, dict) and page_data.get("success"):
-            extracted_count += 1
-            url = page_data.get("url", "?")
-            pct = 50 + int((extracted_count / max(total_to_extract, 1)) * 45)
-            emit(
-                "extracting",
-                f"[{extracted_count}/{total_to_extract}] Extracting profile from {url[:60]}...",
-                pct,
-            )
-            profile = await extract_profile(page_data, state["target_name"])
-            if profile:
-                candidates.append(profile)
+
+    extract_semaphore = asyncio.Semaphore(3)
+
+    async def extract_with_limit(page_data):
+        async with extract_semaphore:
+            return await extract_profile(page_data, state["target_name"])
+
+    extract_tasks = [extract_with_limit(p) for p in successful_pages]
+    profiles = await asyncio.gather(*extract_tasks, return_exceptions=True)
+
+    for p in profiles:
+        if isinstance(p, CandidateProfile):
+            candidates.append(p)
+        elif isinstance(p, Exception):
+            logger.warning(f"Profile extraction failed: {p}")
+
+    extracted_ok = sum(1 for p in profiles if isinstance(p, CandidateProfile))
+    emit(
+        "extracting",
+        f"Extracted {extracted_ok} profiles from {len(successful_pages)} pages",
+        95,
+    )
 
     # Deduplicate candidates by profile_url
     seen = set()
@@ -480,39 +493,40 @@ async def deep_scrape(state: AgentState) -> dict:
         0,
     )
 
+    emit(
+        "deep_scrape",
+        f"Deep scraping {len(to_scrape)} candidates concurrently...",
+        10,
+    )
+
+    async def enrich_candidate(candidate):
+        if not candidate.profile_url:
+            return candidate
+        scraped = await scrape_page(candidate.profile_url, max_chars=12000)
+        if scraped.get("success"):
+            enriched_profile = await extract_profile(scraped, state["target_name"])
+            if enriched_profile:
+                for field in ["location", "school", "employer", "bio"]:
+                    new_val = getattr(enriched_profile, field)
+                    if new_val and not getattr(candidate, field):
+                        setattr(candidate, field, new_val)
+                candidate.raw_data.update(enriched_profile.raw_data)
+        return candidate
+
+    results = await asyncio.gather(
+        *[enrich_candidate(c) for c in to_scrape], return_exceptions=True
+    )
+
     enriched = []
-    for i, candidate in enumerate(to_scrape):
-        pct = int(((i + 1) / max(len(to_scrape), 1)) * 100)
-        if candidate.profile_url:
-            emit(
-                "deep_scrape",
-                f"[{i + 1}/{len(to_scrape)}] Scraping {candidate.profile_url[:60]}...",
-                pct,
-            )
-            scraped = await scrape_page(candidate.profile_url, max_chars=12000)
-            if scraped.get("success"):
-                emit(
-                    "deep_scrape",
-                    f"[{i + 1}/{len(to_scrape)}] Extracting enriched data via LLM...",
-                    pct,
-                )
-                # Re-extract with more data
-                enriched_profile = await extract_profile(scraped, state["target_name"])
-                if enriched_profile:
-                    # Merge: keep original data, add new fields
-                    for field in ["location", "school", "employer", "bio"]:
-                        new_val = getattr(enriched_profile, field)
-                        if new_val and not getattr(candidate, field):
-                            setattr(candidate, field, new_val)
-                    candidate.raw_data.update(enriched_profile.raw_data)
-            else:
-                emit(
-                    "deep_scrape",
-                    f"[{i + 1}/{len(to_scrape)}] Scrape failed for {candidate.profile_url[:40]}",
-                    pct,
-                )
-        enriched.append(candidate)
-    emit("deep_scrape", f"Deep scrape complete for {len(enriched)} candidates", 100)
+    for r in results:
+        if isinstance(r, CandidateProfile):
+            enriched.append(r)
+        elif isinstance(r, Exception):
+            logger.warning(f"Deep scrape failed for candidate: {r}")
+
+    emit(
+        "deep_scrape", f"Deep scrape complete: {len(enriched)} candidates enriched", 100
+    )
 
     return {
         "candidates": enriched,
