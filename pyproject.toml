@@ -6,10 +6,10 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "langgraph>=0.2",
-    "langchain-ollama>=0.3",
+    "langchain-google-genai>=2.0",
+    "google-generativeai>=0.8",
     "langchain-community>=0.3",
     "langchain-core>=0.3",
-    "ollama>=0.4",
     "playwright>=1.48",
     "beautifulsoup4>=4.12",
     "httpx>=0.27",
@@ -26,6 +26,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+local = [
+    "langchain-ollama>=0.3",
+    "ollama>=0.4",
+]
 osint = [
     "holehe>=1.61",
     "maigret>=0.4",

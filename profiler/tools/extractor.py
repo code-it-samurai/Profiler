@@ -111,7 +111,7 @@ async def extract_profile(
     )
 
     try:
-        llm = get_llm(num_ctx=8192, json_mode=True)
+        llm = get_llm(json_mode=True)
         response = await llm.ainvoke(
             [
                 SystemMessage(content=system_prompt),

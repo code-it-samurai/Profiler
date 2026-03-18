@@ -445,7 +445,7 @@ async def extract_and_normalize(state: AgentState) -> dict:
     ]
     emit("extract", "task_start", "LLM Extract")
 
-    extract_semaphore = asyncio.Semaphore(3)
+    extract_semaphore = asyncio.Semaphore(10)
 
     async def extract_with_limit(page_data):
         async with extract_semaphore:
@@ -620,7 +620,7 @@ async def analyze_candidates(state: AgentState) -> dict:
 
     narrowing_tpl = _template_env.get_template("narrowing.jinja2")
     narrowing_prompt = narrowing_tpl.render(
-        candidates=candidates[:50],  # cap to prevent context overflow
+        candidates=candidates[:100],  # cap to prevent context overflow
         field_stats=field_stats,
         known_facts=known_facts,
     )
@@ -897,7 +897,7 @@ async def compile_profile(state: AgentState) -> dict:
     compile_prompt = compile_tpl.render(
         target_name=state["target_name"],
         target_type=state["target_type"],
-        candidates=sorted_candidates[:15],  # cap to stay within phi3's context window
+        candidates=sorted_candidates[:30],  # cap for context window
         known_facts=known_facts,
         narrowing_summary=narrowing_summary,
     )
@@ -932,7 +932,7 @@ async def compile_profile(state: AgentState) -> dict:
             "compile",
             "task_done",
             "LLM Compilation",
-            meta={"count": len(sorted_candidates[:15])},
+            meta={"count": len(sorted_candidates[:30])},
         )
 
         # Collect emails from all candidates

@@ -26,6 +26,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.prompt import Prompt
 
+from langchain_core.messages import HumanMessage
+
 from profiler.config import settings
 from profiler.models.enums import TargetType, SessionStatus
 from profiler.agent.graph import build_graph, get_checkpointer
@@ -203,6 +205,33 @@ async def check_ollama():
         return False
 
 
+async def check_llm():
+    """Verify the LLM provider is configured and reachable."""
+    if settings.llm_provider == "gemini":
+        if not settings.gemini_api_key:
+            console.print("[red]GEMINI_API_KEY not set.[/red]")
+            console.print(
+                "[yellow]Get a free key at: https://aistudio.google.com/apikey[/yellow]"
+            )
+            console.print("[yellow]Then: export GEMINI_API_KEY=your_key[/yellow]")
+            return False
+        try:
+            from profiler.agent.llm import get_llm
+
+            llm = get_llm(json_mode=False)
+            await llm.ainvoke([HumanMessage(content="hi")])
+            console.print("[dim]Gemini API ready.[/dim]")
+            return True
+        except Exception as e:
+            console.print(f"[red]Gemini API error: {e}[/red]")
+            return False
+    elif settings.llm_provider == "ollama":
+        return await check_ollama()
+    else:
+        console.print(f"[red]Unknown LLM provider: {settings.llm_provider}[/red]")
+        return False
+
+
 async def run_search(
     args: argparse.Namespace, target_type: TargetType, output_dir: str
 ):
@@ -213,7 +242,7 @@ async def run_search(
     logging.getLogger("langgraph").setLevel(logging.ERROR)
 
     # Pre-flight check
-    if not await check_ollama():
+    if not await check_llm():
         sys.exit(1)
 
     name = args.name

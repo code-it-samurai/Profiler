@@ -1,8 +1,13 @@
+"""LLM wrapper with dual provider support (Gemini / Ollama).
+
+get_llm() returns a LangChain chat model based on settings.llm_provider.
+validated_llm_call() is provider-agnostic — works with any LangChain chat model.
+"""
+
 import json
 import logging
 from typing import TypeVar, Type
 from pydantic import BaseModel, ValidationError
-from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 from profiler.config import settings
 
@@ -10,30 +15,45 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
-def get_llm(num_ctx: int | None = None, json_mode: bool = True) -> ChatOllama:
-    """Create a ChatOllama instance with appropriate settings.
+def get_llm(json_mode: bool = True, num_ctx: int | None = None):
+    """Create a LangChain chat model instance.
+
+    Uses Gemini by default, falls back to Ollama if configured.
 
     Args:
-        num_ctx: Context window size. Use smaller values for simple tasks.
-                 Defaults to settings.ollama_default_num_ctx.
-        json_mode: If True, forces Ollama to output valid JSON.
+        json_mode: If True, forces the model to output valid JSON.
+        num_ctx: Context window size (Ollama only, ignored for Gemini).
     """
-    kwargs = {
-        "model": settings.ollama_model,
-        "base_url": settings.ollama_base_url,
-        "temperature": settings.ollama_temperature,
-        "num_ctx": num_ctx or settings.ollama_default_num_ctx,
-        # Disable "thinking/reasoning" mode for models that support it (e.g. qwen3.5).
-        # When reasoning is enabled, the model puts output in a thinking field
-        # instead of the content field, which breaks JSON extraction.
-        "reasoning": False,
-        # Pass timeout to the underlying ollama httpx client.
-        # Needed for cold model loading (6.6GB qwen3.5:9b can take 30-60s).
-        "client_kwargs": {"timeout": float(settings.ollama_timeout_seconds)},
-    }
-    if json_mode:
-        kwargs["format"] = "json"
-    return ChatOllama(**kwargs)
+    if settings.llm_provider == "gemini":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        kwargs = {
+            "model": settings.gemini_model,
+            "google_api_key": settings.gemini_api_key,
+            "temperature": settings.gemini_temperature,
+            "convert_system_message_to_human": False,
+        }
+        if json_mode:
+            kwargs["model_kwargs"] = {"response_mime_type": "application/json"}
+        return ChatGoogleGenerativeAI(**kwargs)
+
+    elif settings.llm_provider == "ollama":
+        from langchain_ollama import ChatOllama
+
+        kwargs = {
+            "model": settings.ollama_model,
+            "base_url": settings.ollama_base_url,
+            "temperature": settings.ollama_temperature,
+            "num_ctx": num_ctx or settings.ollama_default_num_ctx,
+            "reasoning": False,
+            "client_kwargs": {"timeout": float(settings.ollama_timeout_seconds)},
+        }
+        if json_mode:
+            kwargs["format"] = "json"
+        return ChatOllama(**kwargs)
+
+    else:
+        raise ValueError(f"Unknown LLM provider: {settings.llm_provider}")
 
 
 async def validated_llm_call(
@@ -45,14 +65,14 @@ async def validated_llm_call(
 ) -> T:
     """Call the LLM and validate the response against a Pydantic model.
 
-    Retries up to max_retries times if JSON parsing or validation fails,
-    appending the error to the prompt each retry.
+    Provider-agnostic — works with any LangChain chat model.
+    Retries up to max_retries times if JSON parsing or validation fails.
 
     Args:
         system_prompt: System message content.
         user_prompt: User message content.
         response_model: Pydantic model class to validate against.
-        num_ctx: Context window override.
+        num_ctx: Context window override (Ollama only).
         max_retries: Number of retries on failure.
 
     Returns:
@@ -61,8 +81,16 @@ async def validated_llm_call(
     Raises:
         ValueError: If all retries exhausted.
     """
-    retries = max_retries if max_retries is not None else settings.ollama_max_retries
-    llm = get_llm(num_ctx=num_ctx, json_mode=True)
+    if settings.llm_provider == "gemini":
+        retries = (
+            max_retries if max_retries is not None else settings.gemini_max_retries
+        )
+    else:
+        retries = (
+            max_retries if max_retries is not None else settings.ollama_max_retries
+        )
+
+    llm = get_llm(json_mode=True, num_ctx=num_ctx)
 
     current_user_prompt = user_prompt
     last_error = None
@@ -103,9 +131,7 @@ async def validated_llm_call(
                 f"LLM validation failed (attempt {attempt + 1}): {last_error}"
             )
         except Exception as e:
-            # Catch connection/transport errors (httpx.RemoteProtocolError,
-            # ConnectionError, TimeoutError, etc.) and treat as retryable.
-            last_error = f"LLM connection error: {e}"
+            last_error = f"LLM call error: {e}"
             logger.warning(f"LLM call failed (attempt {attempt + 1}): {last_error}")
 
         # Append error context for retry
