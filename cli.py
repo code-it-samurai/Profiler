@@ -23,20 +23,13 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.prompt import Prompt
-from rich.progress import (
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    BarColumn,
-    TaskProgressColumn,
-)
-from rich import print as rprint
 
 from profiler.config import settings
 from profiler.models.enums import TargetType, SessionStatus
 from profiler.agent.graph import build_graph, get_checkpointer
 from profiler.agent.state import AgentState
 from profiler.agent.progress import set_progress_callback
+from profiler.cli.renderer import ProfilerRenderer
 
 console = Console()
 
@@ -280,34 +273,18 @@ async def run_search(
         "error": None,
     }
 
-    console.print(f"\n[bold]Searching for:[/bold] {name}")
-    if context:
-        console.print(f"[bold]Context:[/bold] {context}")
-    if known_facts:
-        console.print(f"[bold]Known facts:[/bold] {known_facts}")
-    if direct_urls:
-        console.print(f"[bold]Direct URLs:[/bold] {', '.join(direct_urls)}")
-    console.print()
+    # --- Set up renderer and progress callback ---
+    renderer = ProfilerRenderer(console, verbosity=args.verbose)
+    renderer.print_header(
+        target_name=name,
+        target_type=target_type.value,
+        known_facts=known_facts,
+        direct_urls=direct_urls,
+        context=context,
+    )
 
-    # --- Wire up progress callback to print live updates ---
-    _phase_labels = {
-        "broad_search": ("1/6", "cyan", "Broad Search"),
-        "extract": ("2/6", "cyan", "Extract"),
-        "scraping": ("2/6", "blue", "Scraping"),
-        "extracting": ("2/6", "magenta", "LLM Extract"),
-        "analyze": ("3/6", "yellow", "Analyze"),
-        "filter": ("4/6", "yellow", "Filter"),
-        "deep_scrape": ("5/6", "blue", "Deep Scrape"),
-        "compile": ("6/6", "green", "Compile"),
-    }
-
-    def _on_progress(step: str, detail: str, pct: int | None):
-        label_info = _phase_labels.get(step, ("?", "white", step))
-        phase_num, color, phase_name = label_info
-        pct_str = f" {pct}%" if pct is not None else ""
-        console.print(
-            f"  [{color}][{phase_num}] {phase_name}{pct_str}[/{color}] {detail}"
-        )
+    def _on_progress(phase, event, detail, pct=None, meta=None):
+        renderer.on_event(phase, event, detail, pct, meta)
 
     set_progress_callback(_on_progress)
 
@@ -330,6 +307,11 @@ async def run_search(
     if current_state.get("status") == SessionStatus.DONE:
         profile = current_state["final_profile"]
         profile_data = profile.model_dump()
+        renderer.print_final_summary(
+            profile_data=profile_data,
+            data_sources=current_state.get("data_sources_used", ["ddg"]),
+            narrowing_history=current_state.get("narrowing_history", []),
+        )
         print_profile(profile_data, name)
         filepath = save_profile_json(profile_data, name, output_dir)
         console.print(f"\n[green]Saved to:[/green] {filepath}")
@@ -353,33 +335,16 @@ async def run_search(
         # Display the narrowing question
         n_candidates = len(state.get("candidates", []))
         round_num = state.get("narrowing_round", 0) + 1
-
-        console.print(
-            Panel(
-                f"[bold yellow]Narrowing Round {round_num}[/bold yellow] -- "
-                f"{n_candidates} candidates remaining",
-                border_style="yellow",
-            )
-        )
-
         history = state.get("narrowing_history", [])
-        if history:
-            last = history[-1]
-            console.print(
-                f"  [dim]Last round: {last['before']} \u2192 {last['after']} "
-                f"(filtered by {last['field']}={last['answer']})[/dim]"
-            )
-
-        console.print(f"\n[bold]{question['question']}[/bold]")
-
         options = question.get("options")
-        if options:
-            console.print("[dim]Suggestions:[/dim]")
-            for i, opt in enumerate(options, 1):
-                console.print(f"  [cyan]{i}.[/cyan] {opt}")
-            console.print(
-                f"  [dim]Type a number to select, or type your own answer[/dim]"
-            )
+
+        renderer.print_narrowing_question(
+            question=question["question"],
+            options=options,
+            n_candidates=n_candidates,
+            round_num=round_num,
+            history=history,
+        )
 
         # Get user input
         answer = Prompt.ask("\n[bold green]Your answer[/bold green]")
@@ -409,6 +374,11 @@ async def run_search(
 
     if profile:
         profile_data = profile.model_dump()
+        renderer.print_final_summary(
+            profile_data=profile_data,
+            data_sources=final_state.get("data_sources_used", ["ddg"]),
+            narrowing_history=final_state.get("narrowing_history", []),
+        )
         print_profile(profile_data, name)
         filepath = save_profile_json(profile_data, name, output_dir)
         console.print(f"\n[green]Saved to:[/green] {filepath}")
@@ -465,6 +435,13 @@ Examples:
     parser.add_argument("--linkedin", default=None, help="LinkedIn profile URL")
     parser.add_argument("--instagram", default=None, help="Instagram handle")
     parser.add_argument("--website", "-w", default=None, help="Personal website URL")
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=1,
+        help="Increase verbosity (-v for detailed, -vv for debug)",
+    )
 
     args = parser.parse_args()
 
