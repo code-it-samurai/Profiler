@@ -33,6 +33,19 @@ async def scrape_page(
         Dict with keys: url, title, text, meta_description, success, error.
     """
     from urllib.parse import urlparse
+    from profiler.tools.robots import is_scrapable  # lazy import
+
+    # Check robots.txt before scraping — saves wasted HTTP + LLM cost
+    if not await is_scrapable(url):
+        logger.info(f"Skipping {url} — blocked by robots.txt")
+        return {
+            "url": url,
+            "title": "",
+            "text": "",
+            "meta_description": "",
+            "success": False,
+            "error": "blocked_by_robots_txt",
+        }
 
     domain = urlparse(url).netloc.replace("www.", "")
 

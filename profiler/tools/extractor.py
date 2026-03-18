@@ -13,6 +13,14 @@ PLATFORM_MAP = {
     "x.com": Platform.TWITTER,
     "linkedin.com": Platform.LINKEDIN,
     "instagram.com": Platform.INSTAGRAM,
+    "github.com": Platform.GITHUB,
+    "reddit.com": Platform.REDDIT,
+    "tiktok.com": Platform.TIKTOK,
+    "youtube.com": Platform.YOUTUBE,
+    "medium.com": Platform.MEDIUM,
+    "stackoverflow.com": Platform.STACKOVERFLOW,
+    "pinterest.com": Platform.PINTEREST,
+    "t.me": Platform.TELEGRAM,
 }
 
 
@@ -77,6 +85,11 @@ async def extract_profile(
         if not isinstance(raw_content, str):
             raw_content = json.dumps(raw_content)
         data = json.loads(raw_content)
+
+        # Normalize empty strings to None
+        for key in ["name", "location", "school", "employer", "bio"]:
+            if key in data and not data[key]:
+                data[key] = None
 
         return CandidateProfile(
             name=data.get("name", target_name),
