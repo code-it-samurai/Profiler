@@ -1,16 +1,22 @@
-You are compiling a final profile dossier from verified search data.
+You are compiling a profile dossier from verified search data. There may be one or multiple people in the results.
 
-## Target: {{ target_name }} ({{ target_type }})
+## Target Search: {{ target_name }} ({{ target_type }})
 
-## Verified Data:
+## Narrowing Summary:
+- Total candidates: {{ candidates | length }}
+{% if narrowing_summary %}
+- {{ narrowing_summary }}
+{% endif %}
+
+## Candidate Data:
 {% for c in candidates %}
-### Source: {{ c.platform.value }} — {{ c.profile_url }}
-- Name: {{ c.name }}
+### Candidate {{ loop.index }}: {{ c.name }} ({{ c.platform.value }})
+- Profile URL: {{ c.profile_url or "N/A" }}
 - Location: {{ c.location or "N/A" }}
 - School: {{ c.school or "N/A" }}
 - Employer: {{ c.employer or "N/A" }}
 - Bio: {{ c.bio or "N/A" }}
-- Additional data: {{ c.raw_data | tojson }}
+- Confidence: {{ "%.0f" | format(c.confidence * 100) }}%
 {% endfor %}
 
 ## Known Facts (confirmed by user):
@@ -19,20 +25,40 @@ You are compiling a final profile dossier from verified search data.
 {% endfor %}
 
 ## Your Task:
-Synthesize all data into a comprehensive profile.
+Synthesize all candidate data into a comprehensive dossier.
 
 Rules:
-1. Only include facts that appear in the source data above. DO NOT infer or fabricate.
-2. If two sources conflict, note the discrepancy.
-3. Flag any low-confidence fields.
-4. Write a 2-3 paragraph narrative summary.
+1. Only include facts from the source data above. DO NOT fabricate.
+2. If there are MULTIPLE distinct people, describe each one separately.
+3. If two sources conflict, note the discrepancy.
+4. Flag low-confidence fields.
+5. Write a 2-3 paragraph narrative summary covering all identified individuals.
+6. In the candidate_profiles list, include one entry per distinct person found.
+7. confidence_score MUST reflect data completeness:
+   - 0.9-1.0: All fields populated with verified data from multiple sources
+   - 0.7-0.8: Most fields populated, at least one source per claim
+   - 0.4-0.6: Some fields populated but significant gaps
+   - 0.1-0.3: Very limited data, mostly uncertain
+   - Never assign high confidence when location, education, or employment are unknown.
 
 Respond with ONLY this JSON:
 {
-    "summary": "narrative summary paragraph(s)",
-    "locations": ["list of known locations"],
-    "education": ["list of schools/universities"],
-    "employment": ["list of employers/roles"],
+    "summary": "narrative summary covering all people found",
+    "locations": ["all locations across all candidates"],
+    "education": ["all schools/universities"],
+    "employment": ["all employers/roles"],
     "associated_entities": ["related people, companies, orgs"],
-    "confidence_score": 0.0 to 1.0
+    "confidence_score": 0.0 to 1.0,
+    "candidate_profiles": [
+        {
+            "name": "Person Name",
+            "platform": "source platform",
+            "location": "their location",
+            "school": "their school",
+            "employer": "their employer",
+            "bio": "short bio",
+            "profile_url": "url",
+            "confidence": 0.0 to 1.0
+        }
+    ]
 }

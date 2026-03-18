@@ -12,6 +12,20 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Domains that always return 403 for bot user agents despite robots.txt allowing access.
+# Checking these wastes an HTTP request + gets a useless 403 response.
+_ALWAYS_BLOCKED_DOMAINS = {
+    "medium.com",
+    "javascript.plainenglish.io",
+    "betterprogramming.pub",
+    "towardsdatascience.com",
+    "signalhire.com",
+    "rocketreach.co",
+    "zoominfo.com",
+    "lusha.com",
+    "apollo.io",
+}
+
 # Module-level cache: domain → RobotFileParser
 _robots_cache: dict[str, RobotFileParser | None] = {}
 
@@ -30,6 +44,13 @@ async def is_scrapable(url: str) -> bool:
     """
     try:
         parsed = urlparse(url)
+        domain_name = parsed.netloc.replace("www.", "")
+
+        # Check hard-blocked domains first (these always 403 for bots)
+        if any(blocked in domain_name for blocked in _ALWAYS_BLOCKED_DOMAINS):
+            logger.debug(f"Domain {domain_name} is in always-blocked list")
+            return False
+
         domain = f"{parsed.scheme}://{parsed.netloc}"
 
         if domain in _robots_cache:

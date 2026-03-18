@@ -20,9 +20,19 @@ _URL_BLOCKLIST_DOMAINS = {
     "apollo.io",
     "clearbit.com",
     "peopledatalabs.com",
+    "amazon.com",
+    "amazon.in",
+    "amazon.co.uk",
+    "amazon.de",
+    "amazon.fr",
+    "flipkart.com",
+    "ebay.com",
+    "yandex.by",
+    "yandex.ru",
+    "yandex.com",
 }
 
-_URL_BLOCKLIST_PATHS = {
+_URL_BLOCKLIST_PATH_PATTERNS = [
     "/search",
     "/login",
     "/signup",
@@ -32,7 +42,11 @@ _URL_BLOCKLIST_PATHS = {
     "/privacy",
     "/terms",
     "/our-team",
-}
+    "/cart",
+    "/product",
+    "/dp/",
+    "/buy",
+]
 
 # Platform detection by URL domain
 PLATFORM_MAP = {
@@ -86,9 +100,9 @@ async def extract_profile(
     if any(blocked in domain for blocked in _URL_BLOCKLIST_DOMAINS):
         logger.info(f"Skipping blocked domain: {url}")
         return None
-    path = parsed_url.path.rstrip("/")
-    if path in _URL_BLOCKLIST_PATHS:
-        logger.info(f"Skipping blocked path: {url}")
+    path = parsed_url.path.lower()
+    if any(pattern in path for pattern in _URL_BLOCKLIST_PATH_PATTERNS):
+        logger.info(f"Skipping blocked path pattern: {url}")
         return None
 
     platform = detect_platform(scraped_data["url"])
@@ -125,6 +139,20 @@ async def extract_profile(
         if not isinstance(raw_content, str):
             raw_content = json.dumps(raw_content)
         data = json.loads(raw_content)
+
+        # Bug 1: Verify the target name actually appears in the page text.
+        # Guards against the LLM fabricating the target name on irrelevant pages.
+        page_text_lower = page_text.lower()
+        target_parts = target_name.lower().split()
+        name_in_page = any(
+            part in page_text_lower for part in target_parts if len(part) > 2
+        )
+        if not name_in_page:
+            logger.info(
+                f"Target name '{target_name}' not found in page text for "
+                f"{scraped_data['url']}"
+            )
+            return None
 
         # Normalize values: empty strings to None, dicts/lists to strings
         for key in ["name", "location", "school", "employer", "bio"]:

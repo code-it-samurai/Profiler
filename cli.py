@@ -283,143 +283,150 @@ async def run_search(
 
     session_id = str(uuid4())
     checkpointer = await get_checkpointer()
-    graph = build_graph(checkpointer=checkpointer)
-    thread_config = {"configurable": {"thread_id": session_id}}
 
-    initial_state: AgentState = {
-        "target_name": name,
-        "target_type": target_type,
-        "initial_context": context,
-        "session_id": session_id,
-        "known_facts": known_facts,
-        "candidates": [],
-        "eliminated": [],
-        "search_history": [],
-        "narrowing_round": 0,
-        "narrowing_history": [],
-        "current_question": None,
-        "user_answer": None,
-        "_raw_search_results": [],
-        "_external_candidates": [],
-        "data_sources_used": [],
-        "direct_urls": direct_urls,
-        "final_profile": None,
-        "status": SessionStatus.SEARCHING,
-        "error": None,
-    }
+    try:
+        graph = build_graph(checkpointer=checkpointer)
+        thread_config = {"configurable": {"thread_id": session_id}}
 
-    # --- Set up renderer and progress callback ---
-    renderer = ProfilerRenderer(console, verbosity=args.verbose)
-    renderer.print_header(
-        target_name=name,
-        target_type=target_type.value,
-        known_facts=known_facts,
-        direct_urls=direct_urls,
-        context=context,
-    )
+        initial_state: AgentState = {
+            "target_name": name,
+            "target_type": target_type,
+            "initial_context": context,
+            "session_id": session_id,
+            "known_facts": known_facts,
+            "candidates": [],
+            "eliminated": [],
+            "search_history": [],
+            "narrowing_round": 0,
+            "narrowing_history": [],
+            "current_question": None,
+            "user_answer": None,
+            "_raw_search_results": [],
+            "_external_candidates": [],
+            "data_sources_used": [],
+            "direct_urls": direct_urls,
+            "final_profile": None,
+            "status": SessionStatus.SEARCHING,
+            "error": None,
+        }
 
-    def _on_progress(phase, event, detail, pct=None, meta=None):
-        renderer.on_event(phase, event, detail, pct, meta)
-
-    set_progress_callback(_on_progress)
-
-    # --- Run the graph until first interrupt ---
-    current_state = dict(initial_state)
-
-    async for event in graph.astream(initial_state, config=thread_config):
-        for node_name, node_output in event.items():
-            if isinstance(node_output, dict):
-                current_state = {**current_state, **node_output}
-
-    # Check for early failure
-    if current_state.get("status") == SessionStatus.FAILED:
-        console.print(
-            f"\n[red]Search failed:[/red] {current_state.get('error', 'Unknown error')}"
-        )
-        sys.exit(1)
-
-    # Check if it finished without needing narrowing
-    if current_state.get("status") == SessionStatus.DONE:
-        profile = current_state["final_profile"]
-        profile_data = profile.model_dump()
-        renderer.print_final_summary(
-            profile_data=profile_data,
-            data_sources=current_state.get("data_sources_used", ["ddg"]),
-            narrowing_history=current_state.get("narrowing_history", []),
-        )
-        print_profile(profile_data, name)
-        filepath = save_profile_json(profile_data, name, output_dir)
-        console.print(f"\n[green]Saved to:[/green] {filepath}")
-        return
-
-    # --- Narrowing loop ---
-    while True:
-        snapshot = await graph.aget_state(thread_config)
-        state = snapshot.values
-
-        if state.get("status") == SessionStatus.DONE:
-            break
-        if state.get("status") == SessionStatus.FAILED:
-            console.print(f"\n[red]Error:[/red] {state.get('error')}")
-            sys.exit(1)
-
-        question = state.get("current_question")
-        if not question:
-            break
-
-        # Display the narrowing question
-        n_candidates = len(state.get("candidates", []))
-        round_num = state.get("narrowing_round", 0) + 1
-        history = state.get("narrowing_history", [])
-        options = question.get("options")
-
-        renderer.print_narrowing_question(
-            question=question["question"],
-            options=options,
-            n_candidates=n_candidates,
-            round_num=round_num,
-            history=history,
+        # --- Set up renderer and progress callback ---
+        renderer = ProfilerRenderer(console, verbosity=args.verbose)
+        renderer.print_header(
+            target_name=name,
+            target_type=target_type.value,
+            known_facts=known_facts,
+            direct_urls=direct_urls,
+            context=context,
         )
 
-        # Get user input
-        answer = Prompt.ask("\n[bold green]Your answer[/bold green]")
+        def _on_progress(phase, event, detail, pct=None, meta=None):
+            renderer.on_event(phase, event, detail, pct, meta)
 
-        # Handle numbered selection
-        if options and answer.strip().isdigit():
-            idx = int(answer.strip()) - 1
-            if 0 <= idx < len(options):
-                answer = options[idx]
-                console.print(f"[dim]Selected: {answer}[/dim]")
+        set_progress_callback(_on_progress)
 
-        # Resume the graph
-        await graph.aupdate_state(
-            thread_config,
-            {"user_answer": answer, "status": SessionStatus.NARROWING},
-        )
+        # --- Run the graph until first interrupt ---
+        current_state = dict(initial_state)
 
-        async for event in graph.astream(None, config=thread_config):
+        async for event in graph.astream(initial_state, config=thread_config):
             for node_name, node_output in event.items():
                 if isinstance(node_output, dict):
-                    state = {**state, **node_output}
+                    current_state = {**current_state, **node_output}
 
-    # --- Output ---
-    final_snapshot = await graph.aget_state(thread_config)
-    final_state = final_snapshot.values
-    profile = final_state.get("final_profile")
+        # Check for early failure
+        if current_state.get("status") == SessionStatus.FAILED:
+            console.print(
+                f"\n[red]Search failed:[/red] {current_state.get('error', 'Unknown error')}"
+            )
+            sys.exit(1)
 
-    if profile:
-        profile_data = profile.model_dump()
-        renderer.print_final_summary(
-            profile_data=profile_data,
-            data_sources=final_state.get("data_sources_used", ["ddg"]),
-            narrowing_history=final_state.get("narrowing_history", []),
-        )
-        print_profile(profile_data, name)
-        filepath = save_profile_json(profile_data, name, output_dir)
-        console.print(f"\n[green]Saved to:[/green] {filepath}")
-    else:
-        console.print("\n[red]Failed to compile a profile.[/red]")
-        sys.exit(1)
+        # Check if it finished without needing narrowing
+        if current_state.get("status") == SessionStatus.DONE:
+            profile = current_state["final_profile"]
+            profile_data = profile.model_dump()
+            renderer.print_final_summary(
+                profile_data=profile_data,
+                data_sources=current_state.get("data_sources_used", ["ddg"]),
+                narrowing_history=current_state.get("narrowing_history", []),
+            )
+            print_profile(profile_data, name)
+            filepath = save_profile_json(profile_data, name, output_dir)
+            console.print(f"\n[green]Saved to:[/green] {filepath}")
+            return
+
+        # --- Narrowing loop ---
+        while True:
+            snapshot = await graph.aget_state(thread_config)
+            state = snapshot.values
+
+            if state.get("status") == SessionStatus.DONE:
+                break
+            if state.get("status") == SessionStatus.FAILED:
+                console.print(f"\n[red]Error:[/red] {state.get('error')}")
+                sys.exit(1)
+
+            question = state.get("current_question")
+            if not question:
+                break
+
+            # Display the narrowing question
+            n_candidates = len(state.get("candidates", []))
+            round_num = state.get("narrowing_round", 0) + 1
+            history = state.get("narrowing_history", [])
+            options = question.get("options")
+
+            renderer.print_narrowing_question(
+                question=question["question"],
+                options=options,
+                n_candidates=n_candidates,
+                round_num=round_num,
+                history=history,
+            )
+
+            # Get user input
+            answer = Prompt.ask("\n[bold green]Your answer[/bold green]")
+
+            # Handle numbered selection
+            if options and answer.strip().isdigit():
+                idx = int(answer.strip()) - 1
+                if 0 <= idx < len(options):
+                    answer = options[idx]
+                    console.print(f"[dim]Selected: {answer}[/dim]")
+
+            # Resume the graph
+            await graph.aupdate_state(
+                thread_config,
+                {"user_answer": answer, "status": SessionStatus.NARROWING},
+            )
+
+            async for event in graph.astream(None, config=thread_config):
+                for node_name, node_output in event.items():
+                    if isinstance(node_output, dict):
+                        state = {**state, **node_output}
+
+        # --- Output ---
+        final_snapshot = await graph.aget_state(thread_config)
+        final_state = final_snapshot.values
+        profile = final_state.get("final_profile")
+
+        if profile:
+            profile_data = profile.model_dump()
+            renderer.print_final_summary(
+                profile_data=profile_data,
+                data_sources=final_state.get("data_sources_used", ["ddg"]),
+                narrowing_history=final_state.get("narrowing_history", []),
+            )
+            print_profile(profile_data, name)
+            filepath = save_profile_json(profile_data, name, output_dir)
+            console.print(f"\n[green]Saved to:[/green] {filepath}")
+        else:
+            console.print("\n[red]Failed to compile a profile.[/red]")
+            sys.exit(1)
+
+    finally:
+        # Close the aiosqlite connection to prevent "Event loop is closed" errors
+        if hasattr(checkpointer, "conn") and checkpointer.conn:
+            await checkpointer.conn.close()
 
 
 def main():
