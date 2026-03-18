@@ -4,7 +4,7 @@ import logging
 from collections import Counter
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional
 
 from profiler.config import settings
@@ -38,9 +38,18 @@ class SearchQueries(BaseModel):
 class NarrowingDecision(BaseModel):
     field: str
     question: str
-    options: Optional[list[str]] = None
-    reasoning: str
-    expected_elimination_pct: float
+    options: Optional[list] = None  # accept any list, we'll clean it
+    reasoning: str = ""  # LLM sometimes omits this
+    expected_elimination_pct: float = 0.5  # LLM sometimes omits this
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def clean_options(cls, v):
+        if v is None:
+            return None
+        # Filter out None values and non-strings, keep only non-empty strings
+        cleaned = [str(x) for x in v if x is not None and str(x).strip()]
+        return cleaned if cleaned else None
 
 
 class CompilationResult(BaseModel):
@@ -467,15 +476,40 @@ async def extract_and_normalize(state: AgentState) -> dict:
         )
         candidates.extend(external_cands)
 
-    # --- Maigret enrichment: extract usernames from discovered URLs and search ---
+    # --- Maigret enrichment: extract usernames from known social URL patterns ---
     from urllib.parse import urlparse as _urlparse
+
+    _USERNAME_URL_PATTERNS = {
+        "twitter.com": lambda p: p[0] if len(p) == 1 else None,
+        "x.com": lambda p: p[0] if len(p) == 1 else None,
+        "github.com": lambda p: p[0] if len(p) == 1 else None,
+        "instagram.com": lambda p: p[0] if len(p) == 1 else None,
+        "medium.com": lambda p: p[0].lstrip("@") if len(p) == 1 else None,
+        "reddit.com": lambda p: p[1] if len(p) >= 2 and p[0] in ("user", "u") else None,
+    }
 
     discovered_usernames = set()
     for c in candidates:
         if c.profile_url:
-            path = _urlparse(c.profile_url).path.strip("/").split("/")
-            if path and path[-1] and len(path[-1]) > 2 and len(path[-1]) < 40:
-                discovered_usernames.add(path[-1])
+            parsed = _urlparse(c.profile_url)
+            domain = parsed.netloc.replace("www.", "")
+            path_parts = [p for p in parsed.path.strip("/").split("/") if p]
+
+            for pattern_domain, extractor in _USERNAME_URL_PATTERNS.items():
+                if pattern_domain in domain:
+                    username = extractor(path_parts)
+                    if (
+                        username
+                        and 2 < len(username) < 30
+                        and not username.startswith("search")
+                    ):
+                        discovered_usernames.add(username)
+                    break
+
+        # Also use any usernames already on the candidate
+        for u in getattr(c, "usernames", []):
+            if u and 2 < len(u) < 30:
+                discovered_usernames.add(u)
 
     if discovered_usernames:
         from profiler.tools.maigret import search_username

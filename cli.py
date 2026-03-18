@@ -14,7 +14,9 @@ Usage:
 import asyncio
 import argparse
 import json
+import logging
 import sys
+import warnings
 from pathlib import Path
 from datetime import datetime
 from uuid import uuid4
@@ -205,6 +207,10 @@ async def run_search(
     args: argparse.Namespace, target_type: TargetType, output_dir: str
 ):
     """Run the full agent pipeline interactively."""
+
+    # Suppress LangGraph checkpoint deserialization warnings
+    warnings.filterwarnings("ignore", message=".*Deserializing unregistered type.*")
+    logging.getLogger("langgraph").setLevel(logging.ERROR)
 
     # Pre-flight check
     if not await check_ollama():

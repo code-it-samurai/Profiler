@@ -1,5 +1,4 @@
 Generate search queries to find a {{ target_type }} named "{{ target_name }}" on the internet.
-Use advanced search operators (Google dorks) for precision.
 
 {% if initial_context %}Additional context: {{ initial_context }}{% endif %}
 
@@ -17,20 +16,25 @@ Already searched (DO NOT repeat these):
 {% endfor %}
 {% endif %}
 
-Generate 3-5 search queries using these techniques:
-1. Use quotes for exact name match: "{{ target_name }}"
-2. Use site: operator for platform-specific searches: site:linkedin.com inurl:"/in/" "{{ target_name }}"
-3. Combine name with known facts using quotes: "{{ target_name }}" "Portland" (resume OR bio OR profile)
-4. Use OR to broaden: "{{ target_name }}" (employer OR works OR employee)
-5. Use inurl: for profile pages: site:facebook.com inurl:"people" OR inurl:"profile" "{{ target_name }}"
+Generate 3-5 search queries. DuckDuckGo supports these operators:
+1. Quotes for exact match: "{{ target_name }}"
+2. site: for domain restriction: site:linkedin.com "{{ target_name }}"
+3. Combining name with facts: "{{ target_name }}" Portland
 
-Important:
-- Set site_filter to null (not the string "null") if the query already contains a site: operator or if no site filter is needed.
-- Only use site_filter for simple domain restrictions. If using advanced operators, put everything in the query string.
+Query patterns to use:
+- "{{ target_name }}" (plain exact name search)
+- Use site_filter for platform-specific searches (linkedin.com, facebook.com, twitter.com)
+- Combine name with one known fact per query for precision
+- Keep queries SIMPLE — no +, inurl:, OR operators
+
+IMPORTANT:
+- Set site_filter to null (not the string "null") when no domain restriction is needed.
+- When using site_filter, put ONLY the person's name in the query field (the site: prefix is added automatically).
+- Generate at least one plain name search with no site_filter.
 
 Respond with ONLY this JSON:
 {
     "queries": [
-        {"query": "search string with dork operators", "site_filter": null, "purpose": "why this query"}
+        {"query": "search string", "site_filter": null, "purpose": "why this query"}
     ]
 }

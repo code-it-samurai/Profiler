@@ -1,10 +1,38 @@
 import logging
+from urllib.parse import urlparse as _urlparse
+
 from profiler.models.candidate import CandidateProfile
 from profiler.models.enums import Platform
 from profiler.agent.llm import get_llm
+from profiler.tools.matcher import fuzzy_match as _name_match
 from langchain_core.messages import SystemMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
+
+# URLs that never contain useful profile data — skip LLM extraction entirely
+_URL_BLOCKLIST_DOMAINS = {
+    "profile.google.com",
+    "accounts.google.com",
+    "rocketreach.co",
+    "zoominfo.com",
+    "signalhire.com",
+    "lusha.com",
+    "apollo.io",
+    "clearbit.com",
+    "peopledatalabs.com",
+}
+
+_URL_BLOCKLIST_PATHS = {
+    "/search",
+    "/login",
+    "/signup",
+    "/register",
+    "/404",
+    "/about",
+    "/privacy",
+    "/terms",
+    "/our-team",
+}
 
 # Platform detection by URL domain
 PLATFORM_MAP = {
@@ -51,6 +79,18 @@ async def extract_profile(
     if not scraped_data.get("success") or not scraped_data.get("text"):
         return None
 
+    # Bug 5: Skip known non-profile domains and paths
+    url = scraped_data.get("url", "")
+    parsed_url = _urlparse(url)
+    domain = parsed_url.netloc.replace("www.", "")
+    if any(blocked in domain for blocked in _URL_BLOCKLIST_DOMAINS):
+        logger.info(f"Skipping blocked domain: {url}")
+        return None
+    path = parsed_url.path.rstrip("/")
+    if path in _URL_BLOCKLIST_PATHS:
+        logger.info(f"Skipping blocked path: {url}")
+        return None
+
     platform = detect_platform(scraped_data["url"])
 
     # Truncate text for the LLM
@@ -86,12 +126,20 @@ async def extract_profile(
             raw_content = json.dumps(raw_content)
         data = json.loads(raw_content)
 
-        # Normalize empty strings to None
+        # Normalize values: empty strings to None, dicts/lists to strings
         for key in ["name", "location", "school", "employer", "bio"]:
-            if key in data and not data[key]:
+            val = data.get(key)
+            if val is None or val == "":
                 data[key] = None
+            elif isinstance(val, dict):
+                # LLM sometimes returns {"city": "Portland", "country": "India"}
+                data[key] = ", ".join(str(v) for v in val.values() if v)
+            elif isinstance(val, list):
+                data[key] = ", ".join(str(v) for v in val if v)
+            elif not isinstance(val, str):
+                data[key] = str(val)
 
-        return CandidateProfile(
+        profile = CandidateProfile(
             name=data.get("name", target_name),
             platform=platform,
             profile_url=scraped_data["url"],
@@ -101,13 +149,26 @@ async def extract_profile(
             bio=data.get("bio"),
             source_urls=[scraped_data["url"]],
         )
+
+        # Bug 1: Reject candidates whose name doesn't match the target
+        is_match, score = _name_match(profile.name, target_name, threshold=0.5)
+        if not is_match:
+            logger.info(
+                f"Rejecting candidate '{profile.name}' — doesn't match "
+                f"target '{target_name}' (score={score:.2f})"
+            )
+            return None
+        profile.confidence = score
+        return profile
     except Exception as e:
         logger.warning(f"Profile extraction failed for {scraped_data['url']}: {e}")
-        # Fallback: create minimal profile from metadata
+        # Fallback: create minimal profile from metadata — uses target_name
+        # directly so name match is guaranteed (score=1.0)
         return CandidateProfile(
             name=target_name,
             platform=platform,
             profile_url=scraped_data["url"],
             bio=scraped_data.get("meta_description"),
             source_urls=[scraped_data["url"]],
+            confidence=0.3,
         )
