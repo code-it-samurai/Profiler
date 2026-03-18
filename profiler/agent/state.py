@@ -32,6 +32,7 @@ class AgentState(TypedDict):
     eliminated: list[CandidateProfile]
     search_history: list[str]  # queries already executed
     narrowing_round: int
+    narrowing_history: list[dict]  # [{round, before, after, field, answer}]
 
     # Direct URLs provided by user (skip search, scrape directly)
     direct_urls: list[str]  # facebook_url, linkedin_url, website, etc.
@@ -40,6 +41,10 @@ class AgentState(TypedDict):
     current_question: Optional[dict]  # {field, question, options, reasoning}
     user_answer: Optional[str]  # answer from user (set after interrupt)
     _raw_search_results: list[dict]  # raw results passed from broad_search to extract
+    _external_candidates: list[
+        CandidateProfile
+    ]  # structured results from external tools
+    data_sources_used: list[str]  # ["ddg", "holehe", "maigret", ...]
 
     # Output
     final_profile: Optional[Profile]

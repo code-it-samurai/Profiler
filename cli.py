@@ -66,6 +66,47 @@ def print_profile(profile_data: dict, target_name: str):
         console.print(f"\n[bold]Summary[/bold]")
         console.print(profile_data["summary"])
 
+    # Search Journey
+    if profile_data.get("narrowing_summary"):
+        console.print(
+            f"\n[bold]Search Journey:[/bold] {profile_data['narrowing_summary']}"
+        )
+    found = profile_data.get("candidates_found", 0)
+    remaining = profile_data.get("candidates_remaining", 0)
+    if found or remaining:
+        console.print(
+            f"[dim]Candidates: {found} found \u2192 {remaining} remaining[/dim]"
+        )
+
+    # Distinct individuals (multi-person output)
+    candidate_profiles = profile_data.get("candidate_profiles", [])
+    if len(candidate_profiles) > 1:
+        console.print(
+            f"\n[bold]Distinct Individuals ({len(candidate_profiles)}):[/bold]"
+        )
+        for i, cp in enumerate(candidate_profiles, 1):
+            name = cp.get("name", "Unknown")
+            loc = cp.get("location", "N/A")
+            school = cp.get("school", "N/A")
+            employer = cp.get("employer", "N/A")
+            bio = cp.get("bio", "")
+            url = cp.get("profile_url", "")
+            conf = cp.get("confidence", 0)
+            color = "green" if conf > 0.7 else "yellow" if conf > 0.4 else "red"
+            console.print(
+                f"\n  [cyan]{i}.[/cyan] [bold]{name}[/bold] [{color}]{conf:.0%}[/{color}]"
+            )
+            if loc != "N/A":
+                console.print(f"     Location: {loc}")
+            if school != "N/A":
+                console.print(f"     School: {school}")
+            if employer != "N/A":
+                console.print(f"     Employer: {employer}")
+            if bio:
+                console.print(f"     Bio: {bio[:80]}")
+            if url:
+                console.print(f"     [dim]{url}[/dim]")
+
     # Social profiles table
     socials = profile_data.get("social_profiles", [])
     if socials:
@@ -227,9 +268,12 @@ async def run_search(
         "eliminated": [],
         "search_history": [],
         "narrowing_round": 0,
+        "narrowing_history": [],
         "current_question": None,
         "user_answer": None,
         "_raw_search_results": [],
+        "_external_candidates": [],
+        "data_sources_used": [],
         "direct_urls": direct_urls,
         "final_profile": None,
         "status": SessionStatus.SEARCHING,
@@ -317,6 +361,14 @@ async def run_search(
                 border_style="yellow",
             )
         )
+
+        history = state.get("narrowing_history", [])
+        if history:
+            last = history[-1]
+            console.print(
+                f"  [dim]Last round: {last['before']} \u2192 {last['after']} "
+                f"(filtered by {last['field']}={last['answer']})[/dim]"
+            )
 
         console.print(f"\n[bold]{question['question']}[/bold]")
 

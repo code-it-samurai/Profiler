@@ -11,7 +11,7 @@ from profiler.config import settings
 from profiler.agent.llm import validated_llm_call, get_llm
 from profiler.agent.state import AgentState
 from profiler.models.candidate import CandidateProfile
-from profiler.models.enums import SessionStatus, Platform
+from profiler.models.enums import SessionStatus, Platform, TargetType
 from profiler.tools.search import google_search
 from profiler.tools.scraper import scrape_page
 from profiler.tools.extractor import extract_profile
@@ -50,6 +50,7 @@ class CompilationResult(BaseModel):
     employment: list[str] = []
     associated_entities: list[str] = []
     confidence_score: float = 0.0
+    candidate_profiles: list[dict] = []
 
 
 # --- Node Functions ---
@@ -177,40 +178,136 @@ async def broad_search(state: AgentState) -> dict:
     all_queries = enriched_queries + search_plan.queries
     emit("broad_search", f"Generated {len(all_queries)} search queries total", 35)
 
-    # --- E) Execute all searches concurrently ---
+    # --- E) Execute all searches + external tools concurrently ---
     all_results = []
     new_search_history = list(state.get("search_history", []))
+    external_candidates = []  # structured results from tools that bypass LLM
 
-    tasks = []
+    # DDG tasks (existing logic)
+    ddg_tasks = []
     for q in all_queries:
-        query_str = q["query"] if isinstance(q, dict) else q.query
-        site = (
-            q.get("site_filter")
-            if isinstance(q, dict)
-            else getattr(q, "site_filter", None)
-        )
+        # Extract query string defensively — LLM may use varying key names
+        if isinstance(q, dict):
+            query_str = q.get("query") or q.get("search_query") or q.get("q") or ""
+            site = q.get("site_filter")
+        else:
+            query_str = getattr(q, "query", "") or ""
+            site = getattr(q, "site_filter", None)
+        if not query_str:
+            logger.warning(f"Skipping malformed search query: {q}")
+            continue
         if query_str not in new_search_history:
-            tasks.append(google_search(query_str, num_results=10, site_filter=site))
+            ddg_tasks.append(google_search(query_str, num_results=10, site_filter=site))
             new_search_history.append(query_str)
 
-    emit("broad_search", f"Executing {len(tasks)} search queries concurrently...", 40)
-    results_lists = await asyncio.gather(*tasks, return_exceptions=True)
-    for result in results_lists:
+    # External tool tasks (all return structured data, no LLM needed)
+    external_tasks = []
+    external_task_names = []
+
+    if email_hint:
+        from profiler.tools.holehe import check_email_platforms
+
+        external_tasks.append(check_email_platforms(email_hint))
+        external_task_names.append("holehe")
+
+    employer_domain = known_facts.get("employer", "")
+    if employer_domain and "." in employer_domain:
+        from profiler.tools.harvester import harvest
+
+        external_tasks.append(harvest(employer_domain))
+        external_task_names.append("harvester")
+
+    if state["target_type"] == TargetType.COMPANY:
+        from profiler.tools.opencorporates import search_company
+
+        external_tasks.append(search_company(state["target_name"]))
+        external_task_names.append("opencorporates")
+
+    emit(
+        "broad_search",
+        f"Running {len(ddg_tasks)} DDG queries + {len(external_tasks)} external tools...",
+        40,
+    )
+
+    # Run ALL tasks concurrently
+    all_task_results = await asyncio.gather(
+        asyncio.gather(*ddg_tasks, return_exceptions=True),
+        asyncio.gather(*external_tasks, return_exceptions=True),
+    )
+
+    ddg_results_lists = all_task_results[0]
+    external_results_list = all_task_results[1] if external_tasks else []
+
+    # Process DDG results (existing)
+    for result in ddg_results_lists:
         if isinstance(result, list):
             all_results.extend(result)
         elif isinstance(result, Exception):
             logger.warning(f"Search query failed: {result}")
-            # Continue with other results — don't fail
+
+    # Process external tool results
+    data_sources_used = ["ddg"]
+    for i, result in enumerate(external_results_list):
+        tool_name = (
+            external_task_names[i] if i < len(external_task_names) else "unknown"
+        )
+        if isinstance(result, Exception):
+            logger.warning(f"{tool_name} failed: {result}")
+            continue
+        data_sources_used.append(tool_name)
+
+        if tool_name == "holehe" and isinstance(result, list):
+            # Holehe returns [{platform, exists, url}] — convert to search results
+            for entry in result:
+                if entry.get("exists") and entry.get("url"):
+                    all_results.append(
+                        {
+                            "title": f"{state['target_name']} on {entry['platform']}",
+                            "url": entry["url"],
+                            "snippet": f"Account confirmed by holehe on {entry['platform']}",
+                        }
+                    )
+
+        elif tool_name == "harvester" and isinstance(result, dict):
+            # theHarvester returns {emails, urls, hosts}
+            for url in result.get("urls", []):
+                all_results.append(
+                    {"title": "", "url": url, "snippet": "Found by theHarvester"}
+                )
+            discovered_emails = result.get("emails", [])
+            if discovered_emails:
+                emit(
+                    "broad_search",
+                    f"theHarvester found {len(discovered_emails)} emails",
+                    60,
+                )
+
+        elif tool_name == "opencorporates" and isinstance(result, list):
+            # OpenCorporates returns structured company data — create candidates directly
+            for company in result:
+                external_candidates.append(
+                    CandidateProfile(
+                        name=company.get("name", state["target_name"]),
+                        platform=Platform.GENERIC,
+                        profile_url=company.get("url"),
+                        location=company.get("registered_address"),
+                        employer=company.get("name"),
+                        source_tool="opencorporates",
+                        source_urls=[company.get("url", "")],
+                        confidence=0.6,
+                    )
+                )
 
     emit(
         "broad_search",
-        f"Search complete: {len(all_results)} results from {len(tasks)} queries",
+        f"Search complete: {len(all_results)} results from {len(ddg_tasks)} queries "
+        f"+ {len(external_tasks)} tools ({', '.join(data_sources_used)})",
         90,
     )
 
-    # --- F) Only fail if no results AND no direct URLs ---
+    # --- F) Only fail if no results AND no direct URLs AND no external candidates ---
     has_direct_urls = len(direct_urls) > 0
-    if not all_results and not has_direct_urls:
+    if not all_results and not has_direct_urls and not external_candidates:
         return {
             "status": SessionStatus.FAILED,
             "error": "No search results found for this name.",
@@ -223,6 +320,8 @@ async def broad_search(state: AgentState) -> dict:
         "direct_urls": direct_urls,
         "status": SessionStatus.SEARCHING,
         "_raw_search_results": all_results,
+        "_external_candidates": external_candidates,
+        "data_sources_used": data_sources_used,
     }
 
 
@@ -315,6 +414,48 @@ async def extract_and_normalize(state: AgentState) -> dict:
         95,
     )
 
+    # --- Merge external candidates from broad_search ---
+    external_cands = state.get("_external_candidates", [])
+    if external_cands:
+        emit(
+            "extracting",
+            f"Merging {len(external_cands)} external tool candidates...",
+            96,
+        )
+        candidates.extend(external_cands)
+
+    # --- Maigret enrichment: extract usernames from discovered URLs and search ---
+    from urllib.parse import urlparse as _urlparse
+
+    discovered_usernames = set()
+    for c in candidates:
+        if c.profile_url:
+            path = _urlparse(c.profile_url).path.strip("/").split("/")
+            if path and path[-1] and len(path[-1]) > 2 and len(path[-1]) < 40:
+                discovered_usernames.add(path[-1])
+
+    if discovered_usernames:
+        from profiler.tools.maigret import search_username
+
+        emit(
+            "extracting",
+            f"Running Maigret on {len(discovered_usernames)} discovered usernames...",
+            97,
+        )
+        # Limit to 3 usernames to avoid long waits
+        usernames_to_check = list(discovered_usernames)[:3]
+        maigret_tasks = [search_username(u) for u in usernames_to_check]
+        maigret_results = await asyncio.gather(*maigret_tasks, return_exceptions=True)
+        maigret_count = 0
+        for result in maigret_results:
+            if isinstance(result, list):
+                candidates.extend(result)
+                maigret_count += len(result)
+            elif isinstance(result, Exception):
+                logger.warning(f"Maigret search failed: {result}")
+        if maigret_count > 0:
+            emit("extracting", f"Maigret found {maigret_count} additional profiles", 98)
+
     # Deduplicate candidates by profile_url
     seen = set()
     deduped = []
@@ -325,6 +466,14 @@ async def extract_and_normalize(state: AgentState) -> dict:
             deduped.append(c)
 
     logger.info(f"EXTRACT: Found {len(deduped)} unique candidates")
+
+    # Log field coverage for diagnostics
+    for field in ["location", "school", "employer"]:
+        count = sum(1 for c in deduped if getattr(c, field))
+        logger.info(
+            f"EXTRACT: Field '{field}' populated in {count}/{len(deduped)} candidates"
+        )
+
     emit(
         "extract",
         f"Extraction complete: {len(deduped)} unique candidate profiles found",
@@ -464,10 +613,22 @@ async def filter_candidates(state: AgentState) -> dict:
 
     round_num = state.get("narrowing_round", 0) + 1
 
+    # Build narrowing history entry
+    history = list(state.get("narrowing_history", []))
+    history.append(
+        {
+            "round": round_num,
+            "before": len(candidates),
+            "after": len(kept),
+            "field": field,
+            "answer": answer,
+        }
+    )
+
     logger.info(f"FILTER: {len(kept)} kept, {len(eliminated)} total eliminated")
     emit(
         "filter",
-        f"Result: {len(kept)} candidates kept, {len(candidates) - len(kept)} eliminated this round",
+        f"Round {round_num}: {len(candidates)} \u2192 {len(kept)} remaining (filtered by {field})",
         100,
     )
 
@@ -476,6 +637,7 @@ async def filter_candidates(state: AgentState) -> dict:
         "eliminated": eliminated,
         "known_facts": known_facts,
         "narrowing_round": round_num,
+        "narrowing_history": history,
         "user_answer": None,  # clear for next round
         "current_question": None,
         "status": SessionStatus.NARROWING,
@@ -483,35 +645,52 @@ async def filter_candidates(state: AgentState) -> dict:
 
 
 async def deep_scrape(state: AgentState) -> dict:
-    """Node 6: Deep scrape the final shortlisted candidates."""
+    """Node 6: Deep scrape candidates that have missing key fields."""
     candidates = state.get("candidates", [])
-    to_scrape = candidates[:3]
-    logger.info(f"DEEP_SCRAPE: Enriching {len(to_scrape)} candidates")
+    key_fields = ["location", "school", "employer", "bio"]
+
+    # Partition: candidates missing key fields vs already complete
+    needs_scrape = []
+    already_complete = []
+    for c in candidates:
+        missing = [f for f in key_fields if not getattr(c, f)]
+        if missing:
+            needs_scrape.append(c)
+        else:
+            already_complete.append(c)
+
+    # Sort by confidence descending, take top N
+    needs_scrape.sort(key=lambda c: c.confidence, reverse=True)
+    to_scrape = needs_scrape[: settings.deep_scrape_limit]
+    skipped = needs_scrape[settings.deep_scrape_limit :]
+
+    logger.info(
+        f"DEEP_SCRAPE: {len(to_scrape)} to scrape, "
+        f"{len(already_complete)} already complete, {len(skipped)} skipped"
+    )
     emit(
         "deep_scrape",
-        f"Deep scraping {len(to_scrape)} final candidates for full profiles",
+        f"Deep scraping {len(to_scrape)} candidates "
+        f"({len(already_complete)} already complete, {len(skipped)} skipped)",
         0,
     )
 
-    emit(
-        "deep_scrape",
-        f"Deep scraping {len(to_scrape)} candidates concurrently...",
-        10,
-    )
+    scrape_semaphore = asyncio.Semaphore(5)
 
     async def enrich_candidate(candidate):
-        if not candidate.profile_url:
+        async with scrape_semaphore:
+            if not candidate.profile_url:
+                return candidate
+            scraped = await scrape_page(candidate.profile_url, max_chars=12000)
+            if scraped.get("success"):
+                enriched_profile = await extract_profile(scraped, state["target_name"])
+                if enriched_profile:
+                    for field in key_fields:
+                        new_val = getattr(enriched_profile, field)
+                        if new_val and not getattr(candidate, field):
+                            setattr(candidate, field, new_val)
+                    candidate.raw_data.update(enriched_profile.raw_data)
             return candidate
-        scraped = await scrape_page(candidate.profile_url, max_chars=12000)
-        if scraped.get("success"):
-            enriched_profile = await extract_profile(scraped, state["target_name"])
-            if enriched_profile:
-                for field in ["location", "school", "employer", "bio"]:
-                    new_val = getattr(enriched_profile, field)
-                    if new_val and not getattr(candidate, field):
-                        setattr(candidate, field, new_val)
-                candidate.raw_data.update(enriched_profile.raw_data)
-        return candidate
 
     results = await asyncio.gather(
         *[enrich_candidate(c) for c in to_scrape], return_exceptions=True
@@ -524,12 +703,56 @@ async def deep_scrape(state: AgentState) -> dict:
         elif isinstance(r, Exception):
             logger.warning(f"Deep scrape failed for candidate: {r}")
 
+    # --- Photon crawl: discover additional links from candidate websites ---
+    social_domains = [
+        "facebook.com",
+        "twitter.com",
+        "x.com",
+        "instagram.com",
+        "linkedin.com",
+    ]
+    website_candidates = [
+        c
+        for c in enriched
+        if c.profile_url and not any(d in c.profile_url for d in social_domains)
+    ][:3]  # max 3 to avoid long waits
+
+    if website_candidates:
+        from profiler.tools.photon import crawl_url
+
+        emit(
+            "deep_scrape",
+            f"Running Photon crawler on {len(website_candidates)} websites...",
+            70,
+        )
+        photon_tasks = [crawl_url(c.profile_url, depth=1) for c in website_candidates]
+        photon_results = await asyncio.gather(*photon_tasks, return_exceptions=True)
+
+        for i, result in enumerate(photon_results):
+            if isinstance(result, dict):
+                candidate = website_candidates[i]
+                # Add discovered emails
+                for email in result.get("emails", []):
+                    if email not in candidate.emails:
+                        candidate.emails.append(email)
+                # Add discovered social URLs
+                for url in result.get("social_urls", []):
+                    if url not in candidate.discovered_urls:
+                        candidate.discovered_urls.append(url)
+            elif isinstance(result, Exception):
+                logger.warning(f"Photon crawl failed: {result}")
+
+    # Combine ALL candidates: enriched + already_complete + skipped
+    all_candidates = enriched + already_complete + skipped
+
     emit(
-        "deep_scrape", f"Deep scrape complete: {len(enriched)} candidates enriched", 100
+        "deep_scrape",
+        f"Deep scrape complete: {len(enriched)} enriched, {len(all_candidates)} total",
+        100,
     )
 
     return {
-        "candidates": enriched,
+        "candidates": all_candidates,
         "status": SessionStatus.COMPILING,
     }
 
@@ -538,6 +761,18 @@ async def compile_profile(state: AgentState) -> dict:
     """Node 7: Compile the final profile dossier using the LLM."""
     candidates = state.get("candidates", [])
     known_facts = state.get("known_facts", {})
+
+    # Build narrowing summary from history
+    history = state.get("narrowing_history", [])
+    if history:
+        first_entry = history[0]
+        last_entry = history[-1]
+        narrowing_summary = (
+            f"{first_entry['before']} found \u2192 narrowed to {last_entry['after']} "
+            f"across {len(history)} round(s)"
+        )
+    else:
+        narrowing_summary = ""
 
     logger.info(f"COMPILE: Building profile from {len(candidates)} candidates")
     emit(
@@ -555,12 +790,19 @@ async def compile_profile(state: AgentState) -> dict:
         known_facts=known_facts,
     )
 
+    # Track total before slicing so Profile numbers reflect reality
+    total_candidates = len(candidates)
+
+    # Sort by confidence so best candidates make the cut
+    sorted_candidates = sorted(candidates, key=lambda c: c.confidence, reverse=True)
+
     compile_tpl = _template_env.get_template("compilation.jinja2")
     compile_prompt = compile_tpl.render(
         target_name=state["target_name"],
         target_type=state["target_type"],
-        candidates=candidates,
+        candidates=sorted_candidates[:15],  # cap to stay within phi3's context window
         known_facts=known_facts,
+        narrowing_summary=narrowing_summary,
     )
 
     try:
@@ -595,6 +837,11 @@ async def compile_profile(state: AgentState) -> dict:
             80,
         )
 
+        # Collect emails from all candidates
+        all_emails = []
+        for c in candidates:
+            all_emails.extend(getattr(c, "emails", []))
+
         profile = Profile(
             target_name=state["target_name"],
             target_type=state["target_type"],
@@ -606,6 +853,12 @@ async def compile_profile(state: AgentState) -> dict:
             associated_entities=result.associated_entities,
             sources=sources,
             confidence_score=result.confidence_score,
+            candidates_found=history[0]["before"] if history else total_candidates,
+            candidates_remaining=total_candidates,
+            narrowing_summary=narrowing_summary,
+            candidate_profiles=result.candidate_profiles,
+            emails=list(set(all_emails)),
+            data_sources_used=state.get("data_sources_used", ["ddg"]),
         )
 
         emit(
