@@ -11,6 +11,14 @@ class Platform(str, Enum):
     TWITTER = "twitter"
     LINKEDIN = "linkedin"
     INSTAGRAM = "instagram"
+    GITHUB = "github"
+    REDDIT = "reddit"
+    TIKTOK = "tiktok"
+    YOUTUBE = "youtube"
+    MEDIUM = "medium"
+    STACKOVERFLOW = "stackoverflow"
+    PINTEREST = "pinterest"
+    TELEGRAM = "telegram"
     GENERIC = "generic"
 
 

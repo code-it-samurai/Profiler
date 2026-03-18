@@ -18,4 +18,8 @@ class CandidateProfile(BaseModel):
     raw_data: dict = Field(default_factory=dict)
     source_urls: list[str] = Field(default_factory=list)
     confidence: float = 0.0
+    emails: list[str] = Field(default_factory=list)
+    usernames: list[str] = Field(default_factory=list)
+    discovered_urls: list[str] = Field(default_factory=list)
+    source_tool: str = "ddg"  # which tool discovered this: ddg, holehe, maigret, photon, harvester, opencorp
     scraped_at: datetime = Field(default_factory=datetime.utcnow)

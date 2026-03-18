@@ -41,4 +41,8 @@ class Profile(BaseModel):
     candidates_remaining: int = 0
     narrowing_summary: str = ""
     candidate_profiles: list[dict] = Field(default_factory=list)
+    emails: list[str] = Field(default_factory=list)
+    data_sources_used: list[str] = Field(
+        default_factory=list
+    )  # ["ddg", "holehe", "maigret", ...]
     compiled_at: datetime = Field(default_factory=datetime.utcnow)
