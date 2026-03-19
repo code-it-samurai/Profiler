@@ -2,10 +2,14 @@
 
 get_llm() returns a LangChain chat model based on settings.llm_provider.
 validated_llm_call() is provider-agnostic — works with any LangChain chat model.
+Includes global rate limiter for Gemini free tier and 429-aware retry with backoff.
 """
 
+import asyncio
 import json
 import logging
+import re
+import time
 from typing import TypeVar, Type
 from pydantic import BaseModel, ValidationError
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -13,6 +17,72 @@ from profiler.config import settings
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
+
+# ---------------------------------------------------------------------------
+# Global rate limiter for Gemini free tier
+# Free tier: 15 RPM / 20 RPD for preview models, 1500 RPM for stable models.
+# We enforce a minimum interval between calls to stay under RPM limits.
+# ---------------------------------------------------------------------------
+_gemini_rate_lock = asyncio.Lock()
+_gemini_last_call: float = 0.0
+_GEMINI_MIN_INTERVAL = 4.0  # seconds between calls (safe for 15 RPM)
+
+
+async def _gemini_rate_limit():
+    """Enforce minimum interval between Gemini API calls."""
+    global _gemini_last_call
+    async with _gemini_rate_lock:
+        now = time.monotonic()
+        elapsed = now - _gemini_last_call
+        if elapsed < _GEMINI_MIN_INTERVAL:
+            wait = _GEMINI_MIN_INTERVAL - elapsed
+            logger.debug(f"Rate limiter: waiting {wait:.1f}s before next Gemini call")
+            await asyncio.sleep(wait)
+        _gemini_last_call = time.monotonic()
+
+
+def _extract_text_content(content) -> str:
+    """Extract plain text from LLM response content.
+
+    Handles multiple formats:
+    - str: returned as-is
+    - list of content blocks: [{"type": "text", "text": "..."}, ...] — extracts text
+    - other: json.dumps fallback
+    """
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        # Gemini 3 returns list of content blocks
+        for block in content:
+            if isinstance(block, dict):
+                # {"type": "text", "text": "..."} format
+                if block.get("type") == "text" and "text" in block:
+                    return block["text"]
+                # {"text": "..."} format (no type field)
+                if "text" in block and len(block) <= 2:
+                    return block["text"]
+            elif isinstance(block, str):
+                return block
+        # Fall through — dump the whole thing
+        return json.dumps(content)
+
+    return json.dumps(content)
+
+
+def _parse_retry_delay(error_msg: str) -> float | None:
+    """Extract retryDelay from a Gemini 429 error message.
+
+    Returns seconds to wait, or None if not found.
+    """
+    match = re.search(r"retryDelay['\"]:\s*['\"](\d+\.?\d*)s?['\"]", str(error_msg))
+    if match:
+        return float(match.group(1))
+    # Also try "Please retry in Xs" pattern
+    match = re.search(r"retry in (\d+\.?\d*)s", str(error_msg))
+    if match:
+        return float(match.group(1))
+    return None
 
 
 def get_llm(json_mode: bool = True, num_ctx: int | None = None):
@@ -34,7 +104,7 @@ def get_llm(json_mode: bool = True, num_ctx: int | None = None):
             "convert_system_message_to_human": False,
         }
         if json_mode:
-            kwargs["model_kwargs"] = {"response_mime_type": "application/json"}
+            kwargs["response_mime_type"] = "application/json"
         return ChatGoogleGenerativeAI(**kwargs)
 
     elif settings.llm_provider == "ollama":
@@ -67,6 +137,7 @@ async def validated_llm_call(
 
     Provider-agnostic — works with any LangChain chat model.
     Retries up to max_retries times if JSON parsing or validation fails.
+    For 429 rate limit errors, waits the server-suggested retryDelay before retrying.
 
     Args:
         system_prompt: System message content.
@@ -98,15 +169,16 @@ async def validated_llm_call(
 
     for attempt in range(retries + 1):
         try:
+            # Rate limit for Gemini free tier
+            if settings.llm_provider == "gemini":
+                await _gemini_rate_limit()
+
             messages = [
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=current_user_prompt),
             ]
             response = await llm.ainvoke(messages)
-            raw_text = response.content
-            # Ensure raw_text is a string (langchain types it as str | list)
-            if not isinstance(raw_text, str):
-                raw_text = json.dumps(raw_text)
+            raw_text = _extract_text_content(response.content)
 
             # Strip markdown fences if present (defensive)
             cleaned = raw_text.strip()
@@ -131,10 +203,23 @@ async def validated_llm_call(
                 f"LLM validation failed (attempt {attempt + 1}): {last_error}"
             )
         except Exception as e:
+            error_str = str(e)
             last_error = f"LLM call error: {e}"
             logger.warning(f"LLM call failed (attempt {attempt + 1}): {last_error}")
 
-        # Append error context for retry
+            # For 429 rate limit errors, wait the suggested delay before retrying
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                delay = _parse_retry_delay(error_str) or 30.0
+                delay = min(delay + 5, 65)  # add buffer, cap at 65s
+                if attempt < retries:
+                    logger.info(
+                        f"Rate limited — waiting {delay:.0f}s before retry "
+                        f"(attempt {attempt + 2}/{retries + 1})"
+                    )
+                    await asyncio.sleep(delay)
+                continue  # skip appending error context for rate limits
+
+        # Append error context for retry (JSON/validation errors)
         current_user_prompt = (
             f"{user_prompt}\n\n"
             f"YOUR PREVIOUS RESPONSE WAS INVALID. Error: {last_error}\n"

@@ -445,7 +445,7 @@ async def extract_and_normalize(state: AgentState) -> dict:
     ]
     emit("extract", "task_start", "LLM Extract")
 
-    extract_semaphore = asyncio.Semaphore(10)
+    extract_semaphore = asyncio.Semaphore(3)
 
     async def extract_with_limit(page_data):
         async with extract_semaphore:

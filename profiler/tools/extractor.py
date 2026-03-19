@@ -125,6 +125,13 @@ async def extract_profile(
     )
 
     try:
+        from profiler.agent.llm import _gemini_rate_limit, _extract_text_content
+        from profiler.config import settings as _settings
+
+        # Rate limit for Gemini free tier
+        if _settings.llm_provider == "gemini":
+            await _gemini_rate_limit()
+
         llm = get_llm(json_mode=True)
         response = await llm.ainvoke(
             [
@@ -135,9 +142,7 @@ async def extract_profile(
 
         import json
 
-        raw_content = response.content
-        if not isinstance(raw_content, str):
-            raw_content = json.dumps(raw_content)
+        raw_content = _extract_text_content(response.content)
         data = json.loads(raw_content)
 
         # Bug 1: Verify the target name actually appears in the page text.
