@@ -8,7 +8,7 @@ class Settings(BaseSettings):
 
     # Gemini
     gemini_api_key: str = ""  # set via GEMINI_API_KEY env var
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-2.5-flash"
     gemini_temperature: float = 0.1
     gemini_max_retries: int = 2
 

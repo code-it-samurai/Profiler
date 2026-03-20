@@ -1,13 +1,14 @@
-You are analyzing search candidates to determine the BEST question to ask the user to narrow down results.
+You are helping the user locate the right person(s) from a set of search results.
 
-## Candidates ({{ candidates | length }} total):
+## Current Candidates: {{ candidates | length }} profiles found
+
 {% for c in candidates %}
 - Name: {{ c.name }} | Platform: {{ c.platform.value }} | Location: {{ c.location or "unknown" }} | School: {{ c.school or "unknown" }} | Employer: {{ c.employer or "unknown" }}
 {% endfor %}
 
 ## Field Statistics:
 {% for field, stats in field_stats.items() %}
-- {{ field }}: {{ stats.unique_count }} unique values. Top values: {{ stats.top_values | join(", ") }}
+- {{ field }}: {{ stats.unique_count }} unique values ({{ "%.0f" | format(stats.coverage * 100) }}% of candidates have this field). Top values: {{ stats.top_values | join(", ") }}
 {% endfor %}
 
 ## Already Known:
@@ -16,20 +17,22 @@ You are analyzing search candidates to determine the BEST question to ask the us
 {% endfor %}
 
 ## Your Task:
-Pick the ONE field that will eliminate the most candidates when the user answers.
+Choose the ONE field that will best help the user identify who they are looking for.
 
-Rules:
-1. Pick fields with HIGH variance (many unique values = good discriminator).
-2. Prefer fields the user can easily answer: location > employer > school > bio details.
-3. NEVER ask about a field that is already in "Already Known".
-4. If options are available for the field, include the top 3-4 most common values as suggested options.
-5. The question should be natural and conversational.
+Guidelines:
+1. Your goal is to help the user FIND the right person, not to eliminate candidates. Narrowing is a natural side effect of clarifying who the user is looking for.
+2. Pick fields with HIGH variance (many unique values = good discriminator).
+3. Prefer fields the user can easily answer: location > employer > school > bio details.
+4. NEVER ask about a field already in "Already Known".
+5. If options exist for the chosen field, include the top 3-4 most common values as suggestions.
+6. The question should be natural and conversational.
+7. It is perfectly fine if the search ends with multiple matching people — do not force narrowing to a single person.
 
 Respond with ONLY this JSON:
 {
     "field": "the field name (location, school, employer, etc.)",
     "question": "natural language question to ask the user",
     "options": ["option1", "option2", "option3"] or null,
-    "reasoning": "why this field is the best discriminator",
+    "reasoning": "why this field best helps identify the right person",
     "expected_elimination_pct": 0.75
 }

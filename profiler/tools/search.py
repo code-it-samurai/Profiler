@@ -32,6 +32,10 @@ async def google_search(
     Returns:
         List of dicts with keys: title, url, snippet.
     """
+    # Guard against LLM returning string "null" instead of JSON null
+    if site_filter and site_filter.lower() in ("null", "none", ""):
+        site_filter = None
+
     if site_filter:
         query = f"site:{site_filter} {query}"
 

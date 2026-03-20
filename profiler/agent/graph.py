@@ -15,16 +15,11 @@ from profiler.models.enums import SessionStatus
 
 def should_continue_narrowing(state: AgentState) -> str:
     """Router: decide whether to keep narrowing or move to deep scrape."""
-    candidates = state.get("candidates", [])
     narrowing_round = state.get("narrowing_round", 0)
     status = state.get("status")
 
     # If analyze_candidates decided to compile directly (no more fields)
     if status == SessionStatus.COMPILING:
-        return "deep_scrape"
-
-    # Threshold reached
-    if len(candidates) <= settings.candidate_threshold:
         return "deep_scrape"
 
     # Max rounds reached
@@ -39,8 +34,10 @@ def after_filter(state: AgentState) -> str:
     candidates = state.get("candidates", [])
     narrowing_round = state.get("narrowing_round", 0)
 
-    if len(candidates) <= settings.candidate_threshold:
+    # No candidates left — skip to deep scrape (nothing to narrow)
+    if len(candidates) == 0:
         return "deep_scrape"
+
     if narrowing_round >= settings.max_narrowing_rounds:
         return "deep_scrape"
 
